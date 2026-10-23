@@ -80,7 +80,13 @@ When `DATABASE_URL` is set, `app/storage.py` stores the opt-out list (`sms_opt_o
 2. Run `migrations/001_init.sql` once in the provider's SQL editor (or `psql "$DATABASE_URL" -f migrations/001_init.sql`). It is safe to re-run.
 3. Add `DATABASE_URL` to Vercel → Project → Settings → Environment Variables and redeploy.
 
-If the opt-out lookup fails (database down), the app fails closed and sends no text. Consent-record write failures are logged and never break the call.
+Failure handling (fail closed):
+
+- **Production requires `DATABASE_URL`.** When `VERCEL_ENV=production` or `APP_ENV=production` and `DATABASE_URL` is unset, the app logs an error at startup and disables SMS sending (no silent fallback to memory). Calls still get a polite goodbye.
+- **Consent is recorded first.** `/api/consent` writes the consent record before sending anything. If the write fails, no text is sent and the caller hears: "Sorry, we couldn't send a text right now. Thanks for calling Black Pine Lab. Goodbye."
+- **Opt-out lookup failures** (database down) treat the number as blocked, so no text is sent.
+
+Preview and local environments without `DATABASE_URL` keep the in-memory/log defaults.
 
 ## Project layout
 
@@ -141,7 +147,8 @@ In Twilio Console → Phone Numbers → Manage → Active numbers → your numbe
 | `FORWARD_TO_NUMBER`, `DIAL_TIMEOUT_SECONDS` | no | Ring a real phone first |
 | `ENABLE_HUBSPOT`, `HUBSPOT_TOKEN`, `HUBSPOT_PIPELINE_ID`, `HUBSPOT_PIPELINE_STAGE_ID` | no | Create contact + deal |
 | `ENABLE_RESEND`, `RESEND_API_KEY`, `RESEND_FROM`, `NOTIFY_EMAIL` | no | Owner notification email |
-| `DATABASE_URL` | yes, before activation | Postgres URL (pooled) for opt-outs + consent; unset = in-memory |
+| `DATABASE_URL` | yes in production | Postgres URL (pooled) for opt-outs + consent; unset = in-memory locally, SMS disabled in production |
+| `APP_ENV` | no | Set to `production` to enforce `DATABASE_URL` outside Vercel (`VERCEL_ENV` is set by Vercel automatically) |
 | `SKIP_TWILIO_VALIDATION` | no | Local dev only |
 
 ## License

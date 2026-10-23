@@ -101,3 +101,55 @@ def test_migration_file_creates_tables():
     sql = open("migrations/001_init.sql").read()
     assert "CREATE TABLE IF NOT EXISTS sms_opt_outs" in sql
     assert "CREATE TABLE IF NOT EXISTS sms_consent" in sql
+
+
+@pytest.mark.parametrize("var", ["VERCEL_ENV", "APP_ENV"])
+@patch("app.integrations.get_twilio_client")
+def test_production_without_database_fails_closed(mc, var, client, monkeypatch, caplog):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv(var, "production")
+    try:
+        store = storage.configure_from_env()
+        assert isinstance(store, storage.MissingDatabaseStore)
+        assert "DATABASE_URL is not set in production" in caplog.text
+        r = signed_post(client, "/api/consent", {"From": N, "Digits": "1"})
+        assert "couldn't send a text" in r.text
+        mc.assert_not_called()
+    finally:
+        consent.set_store(consent.log_store)
+
+
+def test_non_production_without_database_keeps_memory(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.delenv("APP_ENV", raising=False)
+    assert storage.configure_from_env() is None
+    assert isinstance(optout._store, optout.MemoryStore)
+
+
+@patch("app.integrations.get_twilio_client")
+def test_consent_write_failure_sends_nothing(mc, client):
+    def broken(record):
+        raise RuntimeError("db down")
+    consent.set_store(broken)
+    try:
+        r = signed_post(client, "/api/consent", {"From": N, "Digits": "1", "CallSid": "CA1"})
+    finally:
+        consent.set_store(consent.log_store)
+    assert r.status_code == 200
+    assert "couldn't send a text" in r.text and "Goodbye" in r.text
+    mc.assert_not_called()
+
+
+@patch("app.integrations.get_twilio_client")
+def test_consent_recorded_before_sms(mc, client):
+    order = []
+    tw = MagicMock()
+    tw.messages.create.side_effect = lambda **k: order.append("sms") or MagicMock(sid="SM1")
+    mc.return_value = tw
+    consent.set_store(lambda rec: order.append("consent"))
+    try:
+        signed_post(client, "/api/consent", {"From": N, "Digits": "1"})
+    finally:
+        consent.set_store(consent.log_store)
+    assert order == ["consent", "sms"]
