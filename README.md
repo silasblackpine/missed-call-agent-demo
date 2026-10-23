@@ -23,8 +23,8 @@ sequenceDiagram
     App-->>Twilio: TwiML <Gather dtmf speech numDigits=1> + consent greeting
     Caller->>Twilio: Presses 1 / says "yes" (or hangs up)
     Twilio->>App: POST /api/consent (Digits / SpeechResult)
-    App->>App: Log consent record (caller, UTC time, answer, CallSid)
-    alt Pressed 1 or said yes
+    App->>App: Log consent record (caller, UTC time, answer, CallSid, greeting_version)
+    alt Pressed 1 or said yes (and not opted out)
         App->>Twilio: Send SMS with Calendly link
         Twilio->>Caller: "Hi, this is Black Pine Lab, sorry we missed your call!..."
     else No answer / other input
@@ -46,12 +46,31 @@ sequenceDiagram
 
 No text is sent automatically. After a missed call the caller hears:
 
-> Hi, you've reached Black Pine Lab. Sorry we missed your call. Would you like us to text you a link to book a time? This is one text message per missed call. Message and data rates may apply. Reply HELP for help or STOP to opt out at any time. Terms are at blackpinelab.com/terms and our privacy policy is at blackpinelab.com/privacy. Press 1 or say yes to receive the text. To skip the text, simply hang up.
+> Hi, you've reached Black Pine Lab. Sorry we missed your call. Would you like us to text you a link to book a time? We will send one initial text after your consent. If you reply, additional conversational responses may follow. Opt-out, help, or re-subscription confirmations may also be sent. Message and data rates may apply. Reply HELP for help or STOP to opt out at any time. Terms are at blackpinelab.com/terms and our privacy policy is at blackpinelab.com/privacy. Press 1 or say yes to receive the text. To skip the text, simply hang up.
 
-- Pressing 1, or speech containing the word "yes", sends one SMS and plays: "Thanks, you're set to receive one text from Black Pine Lab with a booking link. Message and data rates may apply. Goodbye."
+- Pressing 1, or speech containing the word "yes", sends one SMS (unless the number has opted out, see below) and plays:
+
+  > Thanks. We will attempt to send your Black Pine Lab booking link if your number is eligible. If you previously opted out, you must text START or UNSTOP to this number before texts can resume. Message and data rates may apply. Goodbye.
+
 - Any other input or no input: no text, polite goodbye.
 - SMS: `Hi, this is Black Pine Lab, sorry we missed your call! You can book a time here: {CALENDLY_URL} or reply with how we can help. Reply STOP to opt out.`
-- Every answer is written as a JSON consent record (`caller`, `timestamp_utc`, `answer`, `call_sid`, `consented`) to the `missed_call.consent` logger. Plug in a persistent store with `app.consent.set_store(fn)`.
+- Every answer is written as a JSON consent record (`caller`, `timestamp_utc`, `answer`, `call_sid`, `consented`, `greeting_version`) to the `missed_call.consent` logger. `greeting_version` (currently `2026-10-22-artemis-final`) records which script the caller heard, so consent can be matched to the published opt-in page. Plug in a persistent store with `app.consent.set_store(fn)`.
+
+## Inbound SMS keywords (`/api/sms`)
+
+`POST /api/sms` is the number's incoming-message webhook (signature-verified like the voice routes). Keywords are matched case-insensitively on the whole message:
+
+| Keyword | Effect | App reply |
+|---|---|---|
+| `STOP`, `STOPALL`, `UNSUBSCRIBE`, `CANCEL`, `END`, `QUIT` | Number added to the opt-out list | None (empty TwiML) |
+| `START`, `UNSTOP` | Number removed from the opt-out list | None (empty TwiML) |
+| `HELP` | Nothing recorded | `Black Pine Lab: missed-call follow-up texts. Email support@blackpinelab.com. Reply STOP to opt out.` |
+
+On toll-free numbers the carrier/Twilio sends the STOP and START confirmations itself, so the app deliberately does not send its own.
+
+**Opt-out block on consent:** `/api/consent` never texts a number on the opt-out list. Pressing 1 or saying yes on a call does **not** clear an opt-out; only texting START or UNSTOP does. The consent record is still logged.
+
+> **Demo only:** the opt-out list is kept in memory (`app/optout.py`) and is lost on restart or across serverless instances. Before activation it needs durable storage (swap in a store with `app.optout.set_store(...)`), and the Twilio number's incoming-message webhook must be set to `/api/sms`.
 
 ## Project layout
 
@@ -90,6 +109,7 @@ In Twilio Console → Phone Numbers → your number → Voice configuration:
 | Setting | Value |
 |---|---|
 | A call comes in | Webhook, `https://<your-app>/api/voice`, HTTP POST |
+| A message comes in (Messaging configuration) | Webhook, `https://<your-app>/api/sms`, HTTP POST |
 
 The `/api/dial-status` callback is set automatically via the `<Dial action>` in the TwiML.
 
