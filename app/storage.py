@@ -88,11 +88,33 @@ def postgres_storage(url: str) -> SqlStorage:
     return SqlStorage(lambda: psycopg.connect(url, connect_timeout=5), placeholder="%s")
 
 
-def configure_from_env() -> SqlStorage | None:
+class MissingDatabaseStore:
+    """Installed in production when DATABASE_URL is unset: every read/write fails,
+    so the opt-out check fails closed and consent writes fail (no texts sent)."""
+
+    def _fail(self, *_a, **_k):
+        raise RuntimeError("DATABASE_URL is required in production")
+
+    block = unblock = is_blocked = __call__ = _fail
+
+
+def is_production() -> bool:
+    return "production" in {env("VERCEL_ENV").lower(), env("APP_ENV").lower()}
+
+
+def configure_from_env():
     url = env("DATABASE_URL")
-    if not url:
-        return None
     from . import consent, optout
+
+    if not url:
+        if is_production():
+            log.error("DATABASE_URL is not set in production: SMS sending is disabled "
+                      "(fail closed) until durable storage is configured")
+            store = MissingDatabaseStore()
+            optout.set_store(store)
+            consent.set_store(store)
+            return store
+        return None
 
     store = postgres_storage(url)
     optout.set_store(store)

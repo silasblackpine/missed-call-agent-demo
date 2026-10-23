@@ -37,6 +37,8 @@ def record_consent(caller: str, call_sid: str, answer: str, consented: bool,
     }
     try:
         _store(record)
-    except Exception:  # never break the call over logging
+        record["stored"] = True
+    except Exception:  # never break the call; caller must not text without a stored record
         logging.getLogger("missed_call").exception("consent store failed")
+        record["stored"] = False
     return record
