@@ -4,9 +4,10 @@ import re
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from twilio.request_validator import RequestValidator
+from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse
 
-from . import consent, integrations
+from . import consent, integrations, optout
 from .config import env, flag
 
 log = logging.getLogger("missed_call")
@@ -14,18 +15,25 @@ app = FastAPI(title="Missed-Call Agent Demo")
 
 MISSED_STATUSES = {"no-answer", "busy", "failed", "canceled"}
 
+GREETING_VERSION = "2026-10-22-artemis-final"
 GREETING = (
     "Hi, you've reached Black Pine Lab. Sorry we missed your call. "
     "Would you like us to text you a link to book a time? "
-    "This is one text message per missed call. Message and data rates may apply. "
+    "We will send one initial text after your consent. "
+    "If you reply, additional conversational responses may follow. "
+    "Opt-out, help, or re-subscription confirmations may also be sent. "
+    "Message and data rates may apply. "
     "Reply HELP for help or STOP to opt out at any time. "
     "Terms are at blackpinelab.com/terms and our privacy policy is at blackpinelab.com/privacy. "
     "Press 1 or say yes to receive the text. To skip the text, simply hang up."
 )
 CONFIRMATION = (
-    "Thanks, you're set to receive one text from Black Pine Lab with a booking link. "
+    "Thanks. We will attempt to send your Black Pine Lab booking link if your number is eligible. "
+    "If you previously opted out, you must text START or UNSTOP to this number before texts can resume. "
     "Message and data rates may apply. Goodbye."
 )
+HELP_REPLY = ("Black Pine Lab: missed-call follow-up texts. Email support@blackpinelab.com. "
+              "Reply STOP to opt out.")
 GOODBYE_NO_TEXT = "No problem, we won't send a text. Thanks for calling Black Pine Lab. Goodbye."
 
 
@@ -105,15 +113,36 @@ async def consent_route(request: Request):
         call_sid=form.get("CallSid", ""),
         answer=f"digits:{digits}" if digits else f"speech:{speech}",
         consented=agreed,
+        greeting_version=GREETING_VERSION,
     )
     resp = VoiceResponse()
     if agreed:
-        handle_missed_call(caller)
+        # A spoken/keypad yes never clears a STOP; only START/UNSTOP by text does.
+        if optout.is_blocked(caller):
+            log.info("caller %s opted out; skipping SMS", caller)
+        else:
+            handle_missed_call(caller)
         resp.say(CONFIRMATION)
     else:
         resp.say(GOODBYE_NO_TEXT)
     resp.hangup()
     return twiml(resp)
+
+
+@app.post("/api/sms")
+async def inbound_sms(request: Request):
+    """Inbound SMS webhook: record opt-out/opt-in keywords and answer HELP.
+
+    STOP/START confirmations are sent by the carrier on toll-free numbers,
+    so this route deliberately returns an empty response for them.
+    """
+    form = await verified_form(request)
+    sender = form.get("From", "")
+    keyword = optout.handle_keyword(sender, form.get("Body", ""))
+    resp = MessagingResponse()
+    if keyword == "help":
+        resp.message(HELP_REPLY)
+    return Response(content=str(resp), media_type="application/xml")
 
 
 def handle_missed_call(caller: str) -> dict:

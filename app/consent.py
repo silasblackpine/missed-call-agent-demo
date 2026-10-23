@@ -24,13 +24,15 @@ def set_store(fn: Callable[[dict], None]) -> None:
     _store = fn
 
 
-def record_consent(caller: str, call_sid: str, answer: str, consented: bool) -> dict:
+def record_consent(caller: str, call_sid: str, answer: str, consented: bool,
+                   greeting_version: str = "") -> dict:
     record = {
         "event": "sms_consent",
         "caller": caller,
         "call_sid": call_sid,
         "answer": answer,
         "consented": consented,
+        "greeting_version": greeting_version,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
     try:

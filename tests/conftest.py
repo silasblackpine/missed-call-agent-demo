@@ -23,3 +23,11 @@ def base_env(monkeypatch):
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def clean_optout():
+    from app import optout
+    optout.reset()
+    yield
+    optout.reset()
