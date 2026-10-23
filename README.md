@@ -1,6 +1,6 @@
 # Missed-Call Agent Demo
 
-Every missed call is a lost lead. This small FastAPI service turns a missed call into a booked appointment: when nobody picks up, the caller gets a text with a booking link within seconds. Optionally it logs the lead in HubSpot and emails the owner via Resend.
+Every missed call is a lost lead. This small FastAPI service turns a missed call into a booked appointment: when nobody picks up, the caller is asked whether they'd like a booking link by text, and only callers who press 1 or say yes get one. Each answer is logged as a consent record. Optionally it logs the lead in HubSpot and emails the owner via Resend.
 
 Built by [Black Pine Lab](https://blackpinelab.com).
 
@@ -20,8 +20,16 @@ sequenceDiagram
     Twilio->>Phone: Rings
     Phone--xTwilio: No answer / busy
     Twilio->>App: POST /api/dial-status (DialCallStatus=no-answer)
-    App->>Twilio: Send SMS with Calendly link
-    Twilio->>Caller: "Sorry we missed you, book here..."
+    App-->>Twilio: TwiML <Gather dtmf speech numDigits=1> + consent greeting
+    Caller->>Twilio: Presses 1 / says "yes" (or hangs up)
+    Twilio->>App: POST /api/consent (Digits / SpeechResult)
+    App->>App: Log consent record (caller, UTC time, answer, CallSid)
+    alt Pressed 1 or said yes
+        App->>Twilio: Send SMS with Calendly link
+        Twilio->>Caller: "Hi, this is Black Pine Lab, sorry we missed your call!..."
+    else No answer / other input
+        App-->>Twilio: Polite goodbye, no text
+    end
     opt ENABLE_HUBSPOT
         App->>HubSpot: Create contact + deal (first stage)
     end
@@ -34,11 +42,23 @@ sequenceDiagram
 - Optional hooks can fail without breaking the call flow.
 - If `FORWARD_TO_NUMBER` is blank, every call is treated as missed (handy for demos).
 
+## SMS consent (verbal opt-in)
+
+No text is sent automatically. After a missed call the caller hears:
+
+> Hi, you've reached Black Pine Lab. Sorry we missed your call. Would you like us to text you a link to book a time? This is one text message per missed call. Message and data rates may apply. Reply HELP for help or STOP to opt out at any time. Terms are at blackpinelab.com/terms and our privacy policy is at blackpinelab.com/privacy. Press 1 or say yes to receive the text. To skip the text, simply hang up.
+
+- Pressing 1, or speech containing the word "yes", sends one SMS and plays: "Thanks, you're set to receive one text from Black Pine Lab with a booking link. Message and data rates may apply. Goodbye."
+- Any other input or no input: no text, polite goodbye.
+- SMS: `Hi, this is Black Pine Lab, sorry we missed your call! You can book a time here: {CALENDLY_URL} or reply with how we can help. Reply STOP to opt out.`
+- Every answer is written as a JSON consent record (`caller`, `timestamp_utc`, `answer`, `call_sid`, `consented`) to the `missed_call.consent` logger. Plug in a persistent store with `app.consent.set_store(fn)`.
+
 ## Project layout
 
 ```
 api/index.py          Vercel entrypoint
 app/main.py           Webhooks + TwiML
+app/consent.py        SMS consent records (pluggable store)
 app/integrations.py   Twilio SMS, HubSpot, Resend
 tests/                Unit tests (all external APIs mocked)
 vercel.json           Routes /api/* to the app
