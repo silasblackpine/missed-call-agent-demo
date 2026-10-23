@@ -96,7 +96,6 @@ app/main.py           Webhooks + TwiML
 app/consent.py        SMS consent records (pluggable store)
 app/integrations.py   Twilio SMS, HubSpot, Resend
 tests/                Unit tests (all external APIs mocked)
-vercel.json           Routes /api/* to the app
 ```
 
 ## Run locally
@@ -113,7 +112,7 @@ Expose it with a tunnel (e.g. `ngrok http 8000`) and set `PUBLIC_BASE_URL` to th
 
 ## Deploy to Vercel (free tier)
 
-1. Import this repo in Vercel (framework preset: Other).
+1. Import this repo in Vercel (framework preset: FastAPI).
 2. Add the env vars from `.env.example` under Project → Settings → Environment Variables.
 3. Set `PUBLIC_BASE_URL` to your production URL, e.g. `https://missed-call-agent-demo.vercel.app`, and redeploy.
 4. Check `https://<your-app>/api/health` returns `{"ok": true}`.
@@ -144,6 +143,7 @@ In Twilio Console → Phone Numbers → Manage → Active numbers → your numbe
 | `PUBLIC_BASE_URL` | yes | Public URL used for signature validation |
 | `CALENDLY_URL` | yes | Booking link texted to callers |
 | `BUSINESS_NAME` | no | Used in the SMS |
+| `TWILIO_VOICE` | no | Voice for every spoken prompt (`<Say voice>`), default `Polly.Joanna-Neural` (Amazon Polly neural, en-US). Any Twilio `{Provider}.{Voice}` name works |
 | `FORWARD_TO_NUMBER`, `DIAL_TIMEOUT_SECONDS` | no | Ring a real phone first |
 | `ENABLE_HUBSPOT`, `HUBSPOT_TOKEN`, `HUBSPOT_PIPELINE_ID`, `HUBSPOT_PIPELINE_STAGE_ID` | no | Create contact + deal |
 | `ENABLE_RESEND`, `RESEND_API_KEY`, `RESEND_FROM`, `NOTIFY_EMAIL` | no | Owner notification email |
