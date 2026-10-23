@@ -144,3 +144,24 @@ def test_hook_failure_does_not_break_call(mock_client, _r, client):
     r = signed_post(client, "/api/consent",
                     {"From": "+15551234567", "Digits": "1"})
     assert r.status_code == 200
+
+
+def test_say_uses_polly_neural_voice_by_default(monkeypatch):
+    from twilio.twiml.voice_response import VoiceResponse
+    from app import main
+    monkeypatch.delenv("TWILIO_VOICE", raising=False)
+    r = VoiceResponse()
+    main.say(r, main.GREETING)
+    xml = str(r)
+    assert 'voice="Polly.Joanna-Neural"' in xml
+    assert 'language="en-US"' in xml
+    assert main.GREETING_VERSION == "2026-10-22-artemis-final"
+
+
+def test_say_voice_configurable(monkeypatch):
+    from twilio.twiml.voice_response import VoiceResponse
+    from app import main
+    monkeypatch.setenv("TWILIO_VOICE", "Polly.Matthew-Neural")
+    r = VoiceResponse()
+    main.say(r, "hi")
+    assert 'voice="Polly.Matthew-Neural"' in str(r)

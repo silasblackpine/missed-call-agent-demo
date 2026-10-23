@@ -62,6 +62,15 @@ async def verified_form(request: Request) -> dict:
     return form
 
 
+DEFAULT_VOICE = "Polly.Joanna-Neural"
+VOICE_LANGUAGE = "en-US"
+
+
+def say(target, text: str) -> None:
+    """Speak text with the configured Twilio voice (Amazon Polly neural by default)."""
+    target.say(text, voice=env("TWILIO_VOICE") or DEFAULT_VOICE, language=VOICE_LANGUAGE)
+
+
 def twiml(resp: VoiceResponse) -> Response:
     return Response(content=str(resp), media_type="application/xml")
 
@@ -77,7 +86,7 @@ async def voice(request: Request):
     resp = VoiceResponse()
     forward = env("FORWARD_TO_NUMBER")
     if forward:
-        resp.say("Thanks for calling. Connecting you now.")
+        say(resp, "Thanks for calling. Connecting you now.")
         dial = resp.dial(
             timeout=int(env("DIAL_TIMEOUT_SECONDS", "20")),
             action="/api/dial-status",
@@ -98,8 +107,8 @@ async def dial_status(request: Request):
     if status in MISSED_STATUSES and caller:
         gather = resp.gather(input="dtmf speech", num_digits=1, action="/api/consent",
                              method="POST", timeout=6, speech_timeout="auto")
-        gather.say(GREETING)
-        resp.say(GOODBYE_NO_TEXT)
+        say(gather, GREETING)
+        say(resp, GOODBYE_NO_TEXT)
     resp.hangup()
     return twiml(resp)
 
@@ -122,16 +131,16 @@ async def consent_route(request: Request):
     if agreed and not record["stored"]:
         # No durable consent record -> no text.
         log.error("consent not stored for %s; skipping SMS", caller)
-        resp.say(CONSENT_STORE_FAILED)
+        say(resp, CONSENT_STORE_FAILED)
     elif agreed:
         # A spoken/keypad yes never clears a STOP; only START/UNSTOP by text does.
         if optout.is_blocked(caller):
             log.info("caller %s opted out; skipping SMS", caller)
         else:
             handle_missed_call(caller)
-        resp.say(CONFIRMATION)
+        say(resp, CONFIRMATION)
     else:
-        resp.say(GOODBYE_NO_TEXT)
+        say(resp, GOODBYE_NO_TEXT)
     resp.hangup()
     return twiml(resp)
 
