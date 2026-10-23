@@ -70,7 +70,23 @@ On toll-free numbers the carrier/Twilio sends the STOP and START confirmations i
 
 **Opt-out block on consent:** `/api/consent` never texts a number on the opt-out list. Pressing 1 or saying yes on a call does **not** clear an opt-out; only texting START or UNSTOP does. The consent record is still logged.
 
-> **Demo only:** the opt-out list is kept in memory (`app/optout.py`) and is lost on restart or across serverless instances. Before activation it needs durable storage (swap in a store with `app.optout.set_store(...)`), and the Twilio number's incoming-message webhook must be set to `/api/sms`.
+> **Storage:** without `DATABASE_URL` the opt-out list is in memory and consent records go only to logs. That's fine for tests and local runs, but it is lost on restart and not shared across Vercel instances. Set `DATABASE_URL` (see [Durable storage](#durable-storage-postgres)) and point the Twilio incoming-message webhook at `/api/sms` before activation.
+
+## Durable storage (Postgres)
+
+When `DATABASE_URL` is set, `app/storage.py` stores the opt-out list (`sms_opt_outs`) and consent records (`sms_consent`) in Postgres. Any Postgres works; Supabase and Neon both have free tiers.
+
+1. Create a Postgres database and copy its **pooled** connection string (Supabase: "Transaction pooler", port 6543; Neon: the `-pooler` host). Serverless functions open a short connection per request.
+2. Run `migrations/001_init.sql` once in the provider's SQL editor (or `psql "$DATABASE_URL" -f migrations/001_init.sql`). It is safe to re-run.
+3. Add `DATABASE_URL` to Vercel → Project → Settings → Environment Variables and redeploy.
+
+Failure handling (fail closed):
+
+- **Production requires `DATABASE_URL`.** When `VERCEL_ENV=production` or `APP_ENV=production` and `DATABASE_URL` is unset, the app logs an error at startup and disables SMS sending (no silent fallback to memory). Calls still get a polite goodbye.
+- **Consent is recorded first.** `/api/consent` writes the consent record before sending anything. If the write fails, no text is sent and the caller hears: "Sorry, we couldn't send a text right now. Thanks for calling Black Pine Lab. Goodbye."
+- **Opt-out lookup failures** (database down) treat the number as blocked, so no text is sent.
+
+Preview and local environments without `DATABASE_URL` keep the in-memory/log defaults.
 
 ## Project layout
 
@@ -102,16 +118,16 @@ Expose it with a tunnel (e.g. `ngrok http 8000`) and set `PUBLIC_BASE_URL` to th
 3. Set `PUBLIC_BASE_URL` to your production URL, e.g. `https://missed-call-agent-demo.vercel.app`, and redeploy.
 4. Check `https://<your-app>/api/health` returns `{"ok": true}`.
 
-## Configure the Twilio number
+## Twilio setup (do this later, at activation)
 
-In Twilio Console → Phone Numbers → your number → Voice configuration:
+In Twilio Console → Phone Numbers → Manage → Active numbers → your number, set:
 
-| Setting | Value |
-|---|---|
-| A call comes in | Webhook, `https://<your-app>/api/voice`, HTTP POST |
-| A message comes in (Messaging configuration) | Webhook, `https://<your-app>/api/sms`, HTTP POST |
+| Section | Setting | Value |
+|---|---|---|
+| Voice configuration | A call comes in | Webhook, `https://<your-app>.vercel.app/api/voice`, HTTP POST |
+| Messaging configuration | A message comes in | Webhook, `https://<your-app>.vercel.app/api/sms`, HTTP POST |
 
-The `/api/dial-status` callback is set automatically via the `<Dial action>` in the TwiML.
+`/api/dial-status` and `/api/consent` are reached through the TwiML the app returns (`<Dial action>` and `<Gather action>`), so you don't configure them in the console. `PUBLIC_BASE_URL` must equal `https://<your-app>.vercel.app` exactly, or signature checks will fail with 403.
 
 ### Texting US numbers: toll-free vs A2P 10DLC
 
@@ -131,6 +147,8 @@ The `/api/dial-status` callback is set automatically via the `<Dial action>` in 
 | `FORWARD_TO_NUMBER`, `DIAL_TIMEOUT_SECONDS` | no | Ring a real phone first |
 | `ENABLE_HUBSPOT`, `HUBSPOT_TOKEN`, `HUBSPOT_PIPELINE_ID`, `HUBSPOT_PIPELINE_STAGE_ID` | no | Create contact + deal |
 | `ENABLE_RESEND`, `RESEND_API_KEY`, `RESEND_FROM`, `NOTIFY_EMAIL` | no | Owner notification email |
+| `DATABASE_URL` | yes in production | Postgres URL (pooled) for opt-outs + consent; unset = in-memory locally, SMS disabled in production |
+| `APP_ENV` | no | Set to `production` to enforce `DATABASE_URL` outside Vercel (`VERCEL_ENV` is set by Vercel automatically) |
 | `SKIP_TWILIO_VALIDATION` | no | Local dev only |
 
 ## License

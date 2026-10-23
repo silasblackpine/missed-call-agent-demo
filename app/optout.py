@@ -1,6 +1,6 @@
 """SMS opt-out store. Numbers that text a STOP keyword are blocked until they
-text START or UNSTOP. In-memory by default; swap with ``set_store`` for a
-persistent backend (database, KV, etc.)."""
+text START or UNSTOP. In-memory by default (tests/local); ``app.storage.configure_from_env``
+swaps in Postgres when ``DATABASE_URL`` is set."""
 import logging
 
 log = logging.getLogger("missed_call.optout")
@@ -14,10 +14,10 @@ class MemoryStore:
     def __init__(self):
         self._blocked: set[str] = set()
 
-    def block(self, number: str) -> None:
+    def block(self, number: str, keyword: str = "STOP") -> None:
         self._blocked.add(number)
 
-    def unblock(self, number: str) -> None:
+    def unblock(self, number: str, keyword: str = "START") -> None:
         self._blocked.discard(number)
 
     def is_blocked(self, number: str) -> bool:
@@ -37,7 +37,14 @@ def reset() -> None:
 
 
 def is_blocked(number: str) -> bool:
-    return bool(number) and _store.is_blocked(number)
+    """Fail closed: if the store can't be read, treat the number as blocked."""
+    if not number:
+        return False
+    try:
+        return _store.is_blocked(number)
+    except Exception:
+        log.exception("opt-out lookup failed; treating %s as blocked", number)
+        return True
 
 
 def handle_keyword(number: str, body: str) -> str | None:
@@ -46,11 +53,11 @@ def handle_keyword(number: str, body: str) -> str | None:
     if not number:
         return None
     if word in STOP_KEYWORDS:
-        _store.block(number)
+        _store.block(number, word)
         log.info("opt-out recorded for %s (%s)", number, word)
         return "stop"
     if word in START_KEYWORDS:
-        _store.unblock(number)
+        _store.unblock(number, word)
         log.info("opt-in restored for %s (%s)", number, word)
         return "start"
     if word in HELP_KEYWORDS:

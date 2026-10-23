@@ -7,11 +7,12 @@ from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse
 
-from . import consent, integrations, optout
+from . import consent, integrations, optout, storage
 from .config import env, flag
 
 log = logging.getLogger("missed_call")
 app = FastAPI(title="Missed-Call Agent Demo")
+storage.configure_from_env()
 
 MISSED_STATUSES = {"no-answer", "busy", "failed", "canceled"}
 
@@ -34,6 +35,8 @@ CONFIRMATION = (
 )
 HELP_REPLY = ("Black Pine Lab: missed-call follow-up texts. Email support@blackpinelab.com. "
               "Reply STOP to opt out.")
+CONSENT_STORE_FAILED = ("Sorry, we couldn't send a text right now. "
+                        "Thanks for calling Black Pine Lab. Goodbye.")
 GOODBYE_NO_TEXT = "No problem, we won't send a text. Thanks for calling Black Pine Lab. Goodbye."
 
 
@@ -108,7 +111,7 @@ async def consent_route(request: Request):
     digits = form.get("Digits", "")
     speech = form.get("SpeechResult", "")
     agreed = bool(caller) and is_yes(digits, speech)
-    consent.record_consent(
+    record = consent.record_consent(
         caller=caller,
         call_sid=form.get("CallSid", ""),
         answer=f"digits:{digits}" if digits else f"speech:{speech}",
@@ -116,7 +119,11 @@ async def consent_route(request: Request):
         greeting_version=GREETING_VERSION,
     )
     resp = VoiceResponse()
-    if agreed:
+    if agreed and not record["stored"]:
+        # No durable consent record -> no text.
+        log.error("consent not stored for %s; skipping SMS", caller)
+        resp.say(CONSENT_STORE_FAILED)
+    elif agreed:
         # A spoken/keypad yes never clears a STOP; only START/UNSTOP by text does.
         if optout.is_blocked(caller):
             log.info("caller %s opted out; skipping SMS", caller)
