@@ -36,16 +36,68 @@ def test_voice_without_forward_redirects_to_missed(client):
 
 
 @patch("app.integrations.get_twilio_client")
-def test_missed_call_sends_sms(mock_client, client):
-    tw = MagicMock()
-    tw.messages.create.return_value.sid = "SM123"
-    mock_client.return_value = tw
+def test_missed_call_prompts_for_consent_without_texting(mock_client, client):
     r = signed_post(client, "/api/dial-status",
                     {"From": "+15551234567", "DialCallStatus": "no-answer"})
     assert r.status_code == 200
+    assert "<Gather" in r.text and 'action="/api/consent"' in r.text
+    assert 'input="dtmf speech"' in r.text and 'numDigits="1"' in r.text
+    assert "Press 1 or say yes to receive the text." in r.text
+    mock_client.assert_not_called()
+
+
+def _sms_mock(mock_client):
+    tw = MagicMock()
+    tw.messages.create.return_value.sid = "SM123"
+    mock_client.return_value = tw
+    return tw
+
+
+@patch("app.integrations.get_twilio_client")
+def test_consent_digit_1_sends_sms(mock_client, client):
+    tw = _sms_mock(mock_client)
+    r = signed_post(client, "/api/consent",
+                    {"From": "+15551234567", "Digits": "1", "CallSid": "CA1"})
+    assert "set to receive one text" in r.text
     kwargs = tw.messages.create.call_args.kwargs
     assert kwargs["to"] == "+15551234567"
-    assert "https://calendly.com/demo/intro" in kwargs["body"]
+    assert kwargs["body"] == ("Hi, this is Black Pine Lab, sorry we missed your call! "
+                              "You can book a time here: https://calendly.com/demo/intro "
+                              "or reply with how we can help. Reply STOP to opt out.")
+
+
+@patch("app.integrations.get_twilio_client")
+def test_consent_speech_yes_sends_sms(mock_client, client):
+    tw = _sms_mock(mock_client)
+    signed_post(client, "/api/consent",
+                {"From": "+15551234567", "SpeechResult": "Yes, please.", "CallSid": "CA2"})
+    tw.messages.create.assert_called_once()
+
+
+@patch("app.integrations.get_twilio_client")
+def test_other_input_sends_nothing(mock_client, client):
+    for data in ({"Digits": "2"}, {"SpeechResult": "no thanks"}, {"SpeechResult": "yesterday"}, {}):
+        r = signed_post(client, "/api/consent", {"From": "+15551234567", **data})
+        assert "won't send a text" in r.text
+    mock_client.assert_not_called()
+
+
+def test_consent_record_logged(client):
+    from app import consent
+    records = []
+    consent.set_store(records.append)
+    try:
+        with patch("app.integrations.get_twilio_client") as mc:
+            _sms_mock(mc)
+            signed_post(client, "/api/consent",
+                        {"From": "+15551234567", "Digits": "1", "CallSid": "CA9"})
+            signed_post(client, "/api/consent", {"From": "+15551234567", "CallSid": "CA10"})
+    finally:
+        consent.set_store(consent.log_store)
+    assert records[0]["caller"] == "+15551234567" and records[0]["call_sid"] == "CA9"
+    assert records[0]["answer"] == "digits:1" and records[0]["consented"] is True
+    assert records[0]["timestamp_utc"].endswith("+00:00")
+    assert records[1]["consented"] is False
 
 
 @patch("app.integrations.get_twilio_client")
@@ -89,6 +141,6 @@ def test_resend_sends_from_support(monkeypatch):
 @patch("app.integrations.get_twilio_client")
 def test_hook_failure_does_not_break_call(mock_client, _r, client):
     mock_client.return_value.messages.create.return_value.sid = "SM1"
-    r = signed_post(client, "/api/dial-status",
-                    {"From": "+15551234567", "DialCallStatus": "busy"})
+    r = signed_post(client, "/api/consent",
+                    {"From": "+15551234567", "Digits": "1"})
     assert r.status_code == 200
