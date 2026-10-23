@@ -58,7 +58,7 @@ def test_consent_digit_1_sends_sms(mock_client, client):
     tw = _sms_mock(mock_client)
     r = signed_post(client, "/api/consent",
                     {"From": "+15551234567", "Digits": "1", "CallSid": "CA1"})
-    assert "set to receive one text" in r.text
+    assert "We will attempt to send your Black Pine Lab booking link" in r.text
     kwargs = tw.messages.create.call_args.kwargs
     assert kwargs["to"] == "+15551234567"
     assert kwargs["body"] == ("Hi, this is Black Pine Lab, sorry we missed your call! "
