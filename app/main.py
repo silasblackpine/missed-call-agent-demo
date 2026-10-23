@@ -7,11 +7,12 @@ from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse
 
-from . import consent, integrations, optout
+from . import consent, integrations, optout, storage
 from .config import env, flag
 
 log = logging.getLogger("missed_call")
 app = FastAPI(title="Missed-Call Agent Demo")
+storage.configure_from_env()
 
 MISSED_STATUSES = {"no-answer", "busy", "failed", "canceled"}
 
