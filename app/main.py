@@ -1,17 +1,38 @@
 """Missed-call text-back agent: Twilio voice webhooks -> SMS booking link."""
 import logging
+import re
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from twilio.request_validator import RequestValidator
 from twilio.twiml.voice_response import VoiceResponse
 
-from . import integrations
+from . import consent, integrations
 from .config import env, flag
 
 log = logging.getLogger("missed_call")
 app = FastAPI(title="Missed-Call Agent Demo")
 
 MISSED_STATUSES = {"no-answer", "busy", "failed", "canceled"}
+
+GREETING = (
+    "Hi, you've reached Black Pine Lab. Sorry we missed your call. "
+    "Would you like us to text you a link to book a time? "
+    "This is one text message per missed call. Message and data rates may apply. "
+    "Reply HELP for help or STOP to opt out at any time. "
+    "Terms are at blackpinelab.com/terms and our privacy policy is at blackpinelab.com/privacy. "
+    "Press 1 or say yes to receive the text. To skip the text, simply hang up."
+)
+CONFIRMATION = (
+    "Thanks, you're set to receive one text from Black Pine Lab with a booking link. "
+    "Message and data rates may apply. Goodbye."
+)
+GOODBYE_NO_TEXT = "No problem, we won't send a text. Thanks for calling Black Pine Lab. Goodbye."
+
+
+def is_yes(digits: str, speech: str) -> bool:
+    if digits:
+        return digits.strip() == "1"
+    return bool(re.search(r"\byes\b", (speech or "").lower()))
 
 
 async def verified_form(request: Request) -> dict:
@@ -53,7 +74,6 @@ async def voice(request: Request):
         )
         dial.number(forward)
     else:
-        resp.say("Sorry we missed you. We'll text you a booking link right away.")
         resp.redirect("/api/dial-status?DialCallStatus=no-answer", method="POST")
     return twiml(resp)
 
@@ -65,8 +85,33 @@ async def dial_status(request: Request):
     caller = form.get("From", "")
     resp = VoiceResponse()
     if status in MISSED_STATUSES and caller:
+        gather = resp.gather(input="dtmf speech", num_digits=1, action="/api/consent",
+                             method="POST", timeout=6, speech_timeout="auto")
+        gather.say(GREETING)
+        resp.say(GOODBYE_NO_TEXT)
+    resp.hangup()
+    return twiml(resp)
+
+
+@app.post("/api/consent")
+async def consent_route(request: Request):
+    form = await verified_form(request)
+    caller = form.get("From", "")
+    digits = form.get("Digits", "")
+    speech = form.get("SpeechResult", "")
+    agreed = bool(caller) and is_yes(digits, speech)
+    consent.record_consent(
+        caller=caller,
+        call_sid=form.get("CallSid", ""),
+        answer=f"digits:{digits}" if digits else f"speech:{speech}",
+        consented=agreed,
+    )
+    resp = VoiceResponse()
+    if agreed:
         handle_missed_call(caller)
-        resp.say("Sorry we couldn't pick up. We just texted you a link to book a time.")
+        resp.say(CONFIRMATION)
+    else:
+        resp.say(GOODBYE_NO_TEXT)
     resp.hangup()
     return twiml(resp)
 
