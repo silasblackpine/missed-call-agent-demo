@@ -2,6 +2,8 @@
 import logging
 import re
 
+import httpx
+
 from fastapi import FastAPI, HTTPException, Request, Response
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
@@ -38,6 +40,9 @@ HELP_REPLY = ("Black Pine Lab: missed-call follow-up texts. Email support@blackp
 CONSENT_STORE_FAILED = ("Sorry, we couldn't send a text right now. "
                         "Thanks for calling Black Pine Lab. Goodbye.")
 GOODBYE_NO_TEXT = "No problem, we won't send a text. Thanks for calling Black Pine Lab. Goodbye."
+
+ELEVENLABS_REGISTER_CALL_URL = "https://api.elevenlabs.io/v1/convai/twilio/register-call"
+DEFAULT_ELEVENLABS_AGENT_ID = "agent_6201m5xvvahmfm9ajahpbepqt8vx"
 
 
 def is_yes(digits: str, speech: str) -> bool:
@@ -137,10 +142,65 @@ async def consent_route(request: Request):
         if optout.is_blocked(caller):
             log.info("caller %s opted out; skipping SMS", caller)
         else:
-            handle_missed_call(caller)
+            try:
+                handle_missed_call(caller)
+            except Exception:
+                # Twilio errors (toll-free not verified, and any other send failure)
+                # must not drop the stored consent or the hand-off.
+                log.exception("text-back failed for %s", caller)
         say(resp, CONFIRMATION)
+        if flag("ELEVENLABS_HANDOFF_ENABLED"):
+            # Consent record + STOP check + text-back above run first; a send
+            # failure is logged and does not block the hand-off.
+            resp.redirect("/api/handoff?after=consented", method="POST")
+            return twiml(resp)
     else:
+        if flag("ELEVENLABS_HANDOFF_ENABLED") and flag("ELEVENLABS_HANDOFF_ON_DECLINE") and caller:
+            resp.redirect("/api/handoff?after=declined", method="POST")
+            return twiml(resp)
         say(resp, GOODBYE_NO_TEXT)
+    resp.hangup()
+    return twiml(resp)
+
+
+def register_elevenlabs_call(caller: str, called: str) -> str:
+    """Ask ElevenLabs for TwiML that connects this in-progress call to the agent."""
+    r = httpx.post(
+        ELEVENLABS_REGISTER_CALL_URL,
+        headers={"xi-api-key": env("ELEVENLABS_API_KEY")},
+        json={
+            "agent_id": env("ELEVENLABS_AGENT_ID") or DEFAULT_ELEVENLABS_AGENT_ID,
+            "from_number": caller,
+            "to_number": called,
+            "direction": "inbound",
+        },
+        timeout=float(env("ELEVENLABS_TIMEOUT_SECONDS", "5")),
+    )
+    r.raise_for_status()
+    body = r.text
+    if "<Response" not in body:
+        raise ValueError("register-call did not return TwiML")
+    return body
+
+
+@app.post("/api/handoff")
+async def handoff(request: Request):
+    """Connect the caller to the ElevenLabs agent. Fail safe: on any error, end the
+    call exactly as it would have ended without the hand-off."""
+    form = await verified_form(request)
+    after = request.query_params.get("after", "")
+    caller = form.get("From", "")
+    called = form.get("To", "") or env("TWILIO_PHONE_NUMBER")
+    if flag("ELEVENLABS_HANDOFF_ENABLED") and caller and called and env("ELEVENLABS_API_KEY"):
+        try:
+            return Response(content=register_elevenlabs_call(caller, called),
+                            media_type="application/xml")
+        except Exception:
+            log.exception("ElevenLabs hand-off failed for %s", caller)
+    resp = VoiceResponse()
+    if after == "declined":
+        say(resp, GOODBYE_NO_TEXT)
+    # after=consented: CONFIRMATION (ends in "Goodbye.") was already spoken.
     resp.hangup()
     return twiml(resp)
 
