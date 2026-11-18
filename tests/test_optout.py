@@ -16,11 +16,16 @@ def _tw(mc):
 
 def test_greeting_and_confirmation_match_final_page():
     assert GREETING.startswith("Hi, you've reached Black Pine Lab.")
-    assert "We will send one initial text after your consent." in GREETING
-    assert "Opt-out, help, or re-subscription confirmations may also be sent." in GREETING
-    assert GREETING.endswith("To skip the text, simply hang up.")
-    assert CONFIRMATION.startswith("Thanks. We will attempt to send")
-    assert "text START or UNSTOP to this number" in CONFIRMATION
+    assert "This call may be recorded." in GREETING
+    assert "Press 1 or say yes to get one booking-link text after your consent." in GREETING
+    assert "Message and data rates may apply." in GREETING
+    assert "Reply HELP for help or STOP to opt out anytime." in GREETING
+    assert "blackpinelab.com/terms" in GREETING and "blackpinelab.com/privacy" in GREETING
+    assert GREETING.endswith("Hang up to skip.")
+    assert GREETING_VERSION == "2026-11-18-a1"
+    assert CONFIRMATION.startswith("Thanks. If your number is eligible")
+    assert "Text START to this number first" in CONFIRMATION
+    assert "Goodbye." not in CONFIRMATION
 
 
 @patch("app.integrations.get_twilio_client")
@@ -46,7 +51,7 @@ def test_stop_blocks_later_consent(mc, client):
         r = signed_post(client, "/api/sms", {"From": N, "Body": kw})
         assert "<Message" not in r.text  # carrier sends STOP confirmation
         r = signed_post(client, "/api/consent", {"From": N, "SpeechResult": "yes"})
-        assert "START or UNSTOP" in r.text
+        assert "Text START to this number first" in r.text
     tw.messages.create.assert_not_called()
 
 

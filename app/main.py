@@ -20,22 +20,17 @@ storage.configure_from_env()
 
 MISSED_STATUSES = {"no-answer", "busy", "failed", "canceled"}
 
-GREETING_VERSION = "2026-10-22-artemis-final"
+GREETING_VERSION = "2026-11-18-a1"
 GREETING = (
-    "Hi, you've reached Black Pine Lab. Sorry we missed your call. "
-    "Would you like us to text you a link to book a time? "
-    "We will send one initial text after your consent. "
-    "If you reply, additional conversational responses may follow. "
-    "Opt-out, help, or re-subscription confirmations may also be sent. "
-    "Message and data rates may apply. "
-    "Reply HELP for help or STOP to opt out at any time. "
-    "Terms are at blackpinelab.com/terms and our privacy policy is at blackpinelab.com/privacy. "
-    "Press 1 or say yes to receive the text. To skip the text, simply hang up."
+    "Hi, you've reached Black Pine Lab. This call may be recorded. "
+    "Sorry we missed you. Press 1 or say yes to get one booking-link text after your consent. "
+    "Message and data rates may apply. Reply HELP for help or STOP to opt out anytime. "
+    "Terms: blackpinelab.com/terms. Privacy: blackpinelab.com/privacy. Hang up to skip."
 )
 CONFIRMATION = (
-    "Thanks. We will attempt to send your Black Pine Lab booking link if your number is eligible. "
-    "If you previously opted out, you must text START or UNSTOP to this number before texts can resume. "
-    "Message and data rates may apply. Goodbye."
+    "Thanks. If your number is eligible, you'll get a Black Pine Lab booking-link text. "
+    "Message and data rates may apply. Previously opted out? Text START to this number first. "
+    "One moment."
 )
 HELP_REPLY = ("Black Pine Lab: missed-call follow-up texts. Email support@blackpinelab.com. "
               "Reply STOP to opt out.")
@@ -90,16 +85,12 @@ def health():
 @app.post("/api/voice")
 async def voice(request: Request):
     form = await verified_form(request)
-    # Option 2 (ELEVENLABS_DIRECT_ANSWER): still ring FORWARD_TO_NUMBER first
-    # with the same Dial timeout and action, but skip the Polly "Connecting
-    # you now" line so the caller only hears ringback. If the shop number is
-    # unset, fall through to /api/dial-status as a miss (same as today).
-    # Default off: existing press-1 flow is unchanged.
+    # Ring FORWARD_TO_NUMBER first (same Dial timeout and action) with no
+    # Polly "Connecting you now" preface — the caller only hears ringback.
+    # If the shop number is unset, fall through to /api/dial-status as a miss.
     resp = VoiceResponse()
     forward = env("FORWARD_TO_NUMBER")
     if forward:
-        if not flag("ELEVENLABS_DIRECT_ANSWER"):
-            say(resp, "Thanks for calling. Connecting you now.")
         dial = resp.dial(
             timeout=int(env("DIAL_TIMEOUT_SECONDS", "20")),
             action="/api/dial-status",
@@ -205,6 +196,18 @@ def register_elevenlabs_call(caller: str, called: str, dynamic: dict | None = No
     return body
 
 
+def pine_dynamic_variables(form: dict) -> dict:
+    """Dynamic vars shared by /api/handoff and the option-2 silent answer path."""
+    caller = form.get("From", "")
+    called = form.get("To", "") or env("TWILIO_PHONE_NUMBER")
+    return {
+        "caller_number": caller,
+        "called_number": called,
+        "call_sid": form.get("CallSid", ""),
+        "sms_opted_out": "true" if optout.is_blocked(caller) else "false",
+    }
+
+
 @app.post("/api/handoff")
 async def handoff(request: Request):
     """Connect the caller to the ElevenLabs agent. Fail safe: on any error, end the
@@ -215,14 +218,18 @@ async def handoff(request: Request):
     called = form.get("To", "") or env("TWILIO_PHONE_NUMBER")
     if flag("ELEVENLABS_HANDOFF_ENABLED") and caller and called and env("ELEVENLABS_API_KEY"):
         try:
-            return Response(content=register_elevenlabs_call(caller, called),
-                            media_type="application/xml")
+            return Response(
+                content=register_elevenlabs_call(
+                    caller, called, dynamic=pine_dynamic_variables(form)
+                ),
+                media_type="application/xml",
+            )
         except Exception:
             log.exception("ElevenLabs hand-off failed for %s", caller)
     resp = VoiceResponse()
     if after == "declined":
         say(resp, GOODBYE_NO_TEXT)
-    # after=consented: CONFIRMATION (ends in "Goodbye.") was already spoken.
+    # after=consented: CONFIRMATION was already spoken (no "Goodbye.").
     resp.hangup()
     return twiml(resp)
 
@@ -243,12 +250,7 @@ async def answer_with_pine(form: dict) -> Response:
             body = register_elevenlabs_call(
                 caller,
                 called,
-                dynamic={
-                    "caller_number": caller,
-                    "called_number": called,
-                    "call_sid": call_sid,
-                    "sms_opted_out": "true" if blocked else "false",
-                },
+                dynamic=pine_dynamic_variables(form),
             )
             log.info("register-call ok call_sid=%s opted_out=%s", call_sid, blocked)
             return Response(content=body, media_type="application/xml")

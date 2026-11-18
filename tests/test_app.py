@@ -42,7 +42,7 @@ def test_missed_call_prompts_for_consent_without_texting(mock_client, client):
     assert r.status_code == 200
     assert "<Gather" in r.text and 'action="/api/consent"' in r.text
     assert 'input="dtmf speech"' in r.text and 'numDigits="1"' in r.text
-    assert "Press 1 or say yes to receive the text." in r.text
+    assert "Press 1 or say yes to get one booking-link text after your consent." in r.text
     mock_client.assert_not_called()
 
 
@@ -58,7 +58,8 @@ def test_consent_digit_1_sends_sms(mock_client, client):
     tw = _sms_mock(mock_client)
     r = signed_post(client, "/api/consent",
                     {"From": "+15551234567", "Digits": "1", "CallSid": "CA1"})
-    assert "We will attempt to send your Black Pine Lab booking link" in r.text
+    assert "you'll get a Black Pine Lab booking-link text" in r.text
+    assert "Goodbye." not in r.text
     kwargs = tw.messages.create.call_args.kwargs
     assert kwargs["to"] == "+15551234567"
     assert kwargs["body"] == ("Hi, this is Black Pine Lab, sorry we missed your call! "
@@ -155,7 +156,7 @@ def test_say_uses_polly_neural_voice_by_default(monkeypatch):
     xml = str(r)
     assert 'voice="Polly.Joanna-Neural"' in xml
     assert 'language="en-US"' in xml
-    assert main.GREETING_VERSION == "2026-10-22-artemis-final"
+    assert main.GREETING_VERSION == "2026-11-18-a1"
 
 
 def test_say_voice_configurable(monkeypatch):
