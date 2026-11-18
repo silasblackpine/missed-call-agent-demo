@@ -32,7 +32,8 @@ def test_flag_on_texts_then_redirects(h, client, monkeypatch):
     monkeypatch.setenv("ELEVENLABS_HANDOFF_ENABLED", "true")
     r = consent(client, "1")
     h.assert_called_once()
-    assert r.text.index("Thanks. We will attempt") < r.text.index("/api/handoff?after=consented")
+    assert r.text.index("Thanks. If your number is eligible") < r.text.index("/api/handoff?after=consented")
+    assert "Goodbye." not in r.text
 
 
 @patch("app.main.handle_missed_call")
@@ -86,7 +87,7 @@ def test_sms_failure_does_not_block_handoff(h, client, monkeypatch):
         consent_store.set_store(consent_store.log_store)
     assert r.status_code == 200
     assert "/api/handoff" in r.text
-    assert "Thanks. We will attempt" in r.text
+    assert "Thanks. If your number is eligible" in r.text
     assert records and records[0]["consented"] is True
     h.assert_called_once()
 
@@ -96,7 +97,36 @@ def test_handoff_returns_elevenlabs_twiml(reg, client, monkeypatch):
     monkeypatch.setenv("ELEVENLABS_HANDOFF_ENABLED", "true")
     r = client.post("/api/handoff?after=consented", data={"From": "+15551230000", "To": "+18556214282"})
     assert r.text == TWIML
-    reg.assert_called_once_with("+15551230000", "+18556214282")
+    reg.assert_called_once()
+    assert reg.call_args.args[:2] == ("+15551230000", "+18556214282")
+
+
+@patch("app.main.register_elevenlabs_call", return_value=TWIML)
+def test_handoff_sends_pine_dynamic_variables(reg, client, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_HANDOFF_ENABLED", "true")
+    r = client.post(
+        "/api/handoff?after=consented",
+        data={"From": "+15551230000", "To": "+18556214282", "CallSid": "CAhandoff"},
+    )
+    assert r.text == TWIML
+    dynamic = reg.call_args.kwargs["dynamic"]
+    assert dynamic == {
+        "caller_number": "+15551230000",
+        "called_number": "+18556214282",
+        "call_sid": "CAhandoff",
+        "sms_opted_out": "false",
+    }
+
+
+@patch("app.main.register_elevenlabs_call", return_value=TWIML)
+def test_handoff_dynamic_vars_mark_opt_out(reg, client, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_HANDOFF_ENABLED", "true")
+    optout.handle_keyword("+15551239999", "STOP")
+    client.post(
+        "/api/handoff?after=consented",
+        data={"From": "+15551239999", "To": "+18556214282", "CallSid": "CAstop"},
+    )
+    assert reg.call_args.kwargs["dynamic"]["sms_opted_out"] == "true"
 
 
 @patch("app.main.register_elevenlabs_call", side_effect=httpx.ConnectTimeout("x"))

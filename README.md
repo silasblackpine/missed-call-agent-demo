@@ -46,15 +46,15 @@ sequenceDiagram
 
 No text is sent automatically. After a missed call the caller hears:
 
-> Hi, you've reached Black Pine Lab. Sorry we missed your call. Would you like us to text you a link to book a time? We will send one initial text after your consent. If you reply, additional conversational responses may follow. Opt-out, help, or re-subscription confirmations may also be sent. Message and data rates may apply. Reply HELP for help or STOP to opt out at any time. Terms are at blackpinelab.com/terms and our privacy policy is at blackpinelab.com/privacy. Press 1 or say yes to receive the text. To skip the text, simply hang up.
+> Hi, you've reached Black Pine Lab. This call may be recorded. Sorry we missed you. Press 1 or say yes to get one booking-link text after your consent. Message and data rates may apply. Reply HELP for help or STOP to opt out anytime. Terms: blackpinelab.com/terms. Privacy: blackpinelab.com/privacy. Hang up to skip.
 
 - Pressing 1, or speech containing the word "yes", sends one SMS (unless the number has opted out, see below) and plays:
 
-  > Thanks. We will attempt to send your Black Pine Lab booking link if your number is eligible. If you previously opted out, you must text START or UNSTOP to this number before texts can resume. Message and data rates may apply. Goodbye.
+  > Thanks. If your number is eligible, you'll get a Black Pine Lab booking-link text. Message and data rates may apply. Previously opted out? Text START to this number first. One moment.
 
 - Any other input or no input: no text, polite goodbye.
 - SMS: `Hi, this is Black Pine Lab, sorry we missed your call! You can book a time here: {CALENDLY_URL} or reply with how we can help. Reply STOP to opt out.`
-- Every answer is written as a JSON consent record (`caller`, `timestamp_utc`, `answer`, `call_sid`, `consented`, `greeting_version`) to the `missed_call.consent` logger. `greeting_version` (currently `2026-10-22-artemis-final`) records which script the caller heard, so consent can be matched to the published opt-in page. Plug in a persistent store with `app.consent.set_store(fn)`.
+- Every answer is written as a JSON consent record (`caller`, `timestamp_utc`, `answer`, `call_sid`, `consented`, `greeting_version`) to the `missed_call.consent` logger. `greeting_version` (currently `2026-11-18-a1`) records which script the caller heard, so consent can be matched to the published opt-in page. Plug in a persistent store with `app.consent.set_store(fn)`.
 
 ## Inbound SMS keywords (`/api/sms`)
 

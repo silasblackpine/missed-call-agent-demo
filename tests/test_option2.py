@@ -29,6 +29,7 @@ def test_flag_off_voice_unchanged(client):
     assert r.status_code == 200
     assert "/api/dial-status" in r.text
     assert "<Connect" not in r.text
+    assert "Connecting you now" not in r.text
 
 
 def test_direct_answer_rings_forward_without_polly(client, monkeypatch):
