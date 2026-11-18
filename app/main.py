@@ -171,6 +171,15 @@ ALLOWED_MESSAGE_TYPES = {"booking_link"}
 REGISTER_CALL_FAIL_SAFE = (
     "Sorry, we're having trouble connecting this call. Please try again in a moment."
 )
+# Stay under Twilio's ~15s voice-webhook limit: 10s per register-call attempt,
+# then a silent <Redirect> to retry. Three attempts ≈ 30s before fail-safe.
+DEFAULT_REGISTER_TIMEOUT_SECONDS = "10"
+REGISTER_CALL_MAX_ATTEMPTS = 3
+PINE_CONNECT_PATH = "/api/pine-connect"
+
+
+def register_call_timeout() -> float:
+    return float(env("ELEVENLABS_TIMEOUT_SECONDS", DEFAULT_REGISTER_TIMEOUT_SECONDS))
 
 
 def register_elevenlabs_call(caller: str, called: str, dynamic: dict | None = None) -> str:
@@ -187,7 +196,7 @@ def register_elevenlabs_call(caller: str, called: str, dynamic: dict | None = No
         ELEVENLABS_REGISTER_CALL_URL,
         headers={"xi-api-key": env("ELEVENLABS_API_KEY")},
         json=payload,
-        timeout=float(env("ELEVENLABS_TIMEOUT_SECONDS", "5")),
+        timeout=register_call_timeout(),
     )
     r.raise_for_status()
     body = r.text
@@ -208,60 +217,88 @@ def pine_dynamic_variables(form: dict) -> dict:
     }
 
 
+def _pine_connect_attempt(request: Request) -> int:
+    raw = request.query_params.get("attempt", "1")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _retry_pine_connect(attempt: int, after: str = "") -> Response:
+    query = f"attempt={attempt + 1}"
+    if after:
+        query += f"&after={after}"
+    resp = VoiceResponse()
+    resp.redirect(f"{PINE_CONNECT_PATH}?{query}", method="POST")
+    return twiml(resp)
+
+
+def try_connect_to_pine(form: dict, attempt: int = 1, *, after: str = "") -> Response:
+    """Register the in-progress call with ElevenLabs. On timeout, silently
+    redirect so the next webhook attempt gets a fresh Twilio time budget.
+    After REGISTER_CALL_MAX_ATTEMPTS, speak the fail-safe line and hang up.
+    """
+    caller = form.get("From", "")
+    called = form.get("To", "") or env("TWILIO_PHONE_NUMBER")
+    call_sid = form.get("CallSid", "")
+    if caller and called and env("ELEVENLABS_API_KEY"):
+        try:
+            body = register_elevenlabs_call(
+                caller, called, dynamic=pine_dynamic_variables(form)
+            )
+            log.info("register-call ok call_sid=%s attempt=%s", call_sid, attempt)
+            return Response(content=body, media_type="application/xml")
+        except httpx.TimeoutException:
+            log.exception("register-call timeout call_sid=%s attempt=%s", call_sid, attempt)
+            if attempt < REGISTER_CALL_MAX_ATTEMPTS:
+                return _retry_pine_connect(attempt, after)
+        except Exception:
+            log.exception("register-call failed call_sid=%s attempt=%s", call_sid, attempt)
+    else:
+        log.error("pine-connect missing caller, called number, or API key; failing safe")
+    resp = VoiceResponse()
+    if after == "declined":
+        say(resp, GOODBYE_NO_TEXT)
+    else:
+        say(resp, REGISTER_CALL_FAIL_SAFE)
+    resp.hangup()
+    return twiml(resp)
+
+
 @app.post("/api/handoff")
 async def handoff(request: Request):
     """Connect the caller to the ElevenLabs agent. Fail safe: on any error, end the
     call exactly as it would have ended without the hand-off."""
     form = await verified_form(request)
     after = request.query_params.get("after", "")
-    caller = form.get("From", "")
-    called = form.get("To", "") or env("TWILIO_PHONE_NUMBER")
-    if flag("ELEVENLABS_HANDOFF_ENABLED") and caller and called and env("ELEVENLABS_API_KEY"):
-        try:
-            return Response(
-                content=register_elevenlabs_call(
-                    caller, called, dynamic=pine_dynamic_variables(form)
-                ),
-                media_type="application/xml",
-            )
-        except Exception:
-            log.exception("ElevenLabs hand-off failed for %s", caller)
+    if flag("ELEVENLABS_HANDOFF_ENABLED"):
+        return try_connect_to_pine(form, _pine_connect_attempt(request), after=after)
     resp = VoiceResponse()
     if after == "declined":
         say(resp, GOODBYE_NO_TEXT)
-    # after=consented: CONFIRMATION was already spoken (no "Goodbye.").
     resp.hangup()
     return twiml(resp)
 
 
-async def answer_with_pine(form: dict) -> Response:
+@app.post("/api/pine-connect")
+async def pine_connect(request: Request):
+    """Retry register-call after a timeout. Signature-verified. Silent until exhausted."""
+    form = await verified_form(request)
+    after = request.query_params.get("after", "")
+    attempt = _pine_connect_attempt(request)
+    log.info("pine-connect call_sid=%s attempt=%s", form.get("CallSid", ""), attempt)
+    return try_connect_to_pine(form, attempt, after=after)
+
+
+async def answer_with_pine(form: dict, attempt: int = 1) -> Response:
     """Silent answer: no greeting <Say>. Register with ElevenLabs and return its TwiML.
 
-    On register-call failure, speak one short fail-safe line and hang up so the
-    caller is not left in silence. That is the only Twilio TTS in this path.
+    On register-call timeout, silently redirect to /api/pine-connect for another
+    attempt. After the last attempt, speak one short fail-safe line and hang up.
     """
-    caller = form.get("From", "")
-    called = form.get("To", "") or env("TWILIO_PHONE_NUMBER")
-    call_sid = form.get("CallSid", "")
-    log.info("direct-pine inbound call_sid=%s", call_sid)
-    if caller and called and env("ELEVENLABS_API_KEY"):
-        blocked = optout.is_blocked(caller)
-        try:
-            body = register_elevenlabs_call(
-                caller,
-                called,
-                dynamic=pine_dynamic_variables(form),
-            )
-            log.info("register-call ok call_sid=%s opted_out=%s", call_sid, blocked)
-            return Response(content=body, media_type="application/xml")
-        except Exception:
-            log.exception("register-call failed call_sid=%s", call_sid)
-    else:
-        log.error("direct-pine missing caller, called number, or API key; failing safe")
-    resp = VoiceResponse()
-    say(resp, REGISTER_CALL_FAIL_SAFE)
-    resp.hangup()
-    return twiml(resp)
+    log.info("direct-pine inbound call_sid=%s attempt=%s", form.get("CallSid", ""), attempt)
+    return try_connect_to_pine(form, attempt)
 
 
 def _tool_secret_ok(provided: str | None) -> bool:
