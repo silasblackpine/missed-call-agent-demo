@@ -130,9 +130,28 @@ def test_handoff_dynamic_vars_mark_opt_out(reg, client, monkeypatch):
 
 
 @patch("app.main.register_elevenlabs_call", side_effect=httpx.ConnectTimeout("x"))
-def test_handoff_error_fails_safe(reg, client, monkeypatch):
+def test_handoff_timeout_redirects_to_retry(reg, client, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_HANDOFF_ENABLED", "true")
+    r = client.post("/api/handoff?after=consented", data={"From": "+15551230000", "To": "+18556214282"})
+    assert "/api/pine-connect?attempt=2" in r.text
+    assert "after=consented" in r.text
+    assert "<Hangup" not in r.text
+    assert "<Connect" not in r.text
+
+
+@patch("app.main.register_elevenlabs_call", side_effect=httpx.ConnectTimeout("x"))
+def test_handoff_timeout_preserves_declined_after_on_retry(reg, client, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_HANDOFF_ENABLED", "true")
+    r = client.post("/api/handoff?after=declined", data={"From": "+15551230000", "To": "+18556214282"})
+    assert "/api/pine-connect?attempt=2" in r.text
+    assert "after=declined" in r.text
+
+
+@patch("app.main.register_elevenlabs_call", side_effect=RuntimeError("boom"))
+def test_handoff_non_timeout_error_fails_safe(reg, client, monkeypatch):
     monkeypatch.setenv("ELEVENLABS_HANDOFF_ENABLED", "true")
     r = client.post("/api/handoff?after=declined", data={"From": "+15551230000", "To": "+18556214282"})
     assert "won't send a text" in r.text and "<Hangup" in r.text
     r = client.post("/api/handoff?after=consented", data={"From": "+15551230000", "To": "+18556214282"})
+    assert "having trouble connecting" in r.text
     assert "<Hangup" in r.text and "<Connect" not in r.text

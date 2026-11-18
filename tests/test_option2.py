@@ -86,14 +86,36 @@ def test_missed_dial_passes_opted_out(reg, client, monkeypatch):
 
 
 @patch("app.main.register_elevenlabs_call", side_effect=httpx.ConnectTimeout("x"))
-def test_missed_dial_fail_safe_with_short_say(reg, client, monkeypatch):
+def test_missed_dial_timeout_redirects_to_retry(reg, client, monkeypatch):
     monkeypatch.setenv("ELEVENLABS_DIRECT_ANSWER", "true")
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
     r = signed_post(client, "/api/dial-status", {**CALL, "DialCallStatus": "no-answer"})
     assert r.status_code == 200
     assert "<Connect" not in r.text
+    assert "having trouble connecting" not in r.text
+    assert "/api/pine-connect?attempt=2" in r.text
+    assert "<Hangup" not in r.text
+
+
+@patch("app.main.register_elevenlabs_call", return_value=TWIML)
+def test_pine_connect_retry_returns_twiml_on_success(reg, client, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+    r = signed_post(client, "/api/pine-connect?attempt=2", CALL)
+    assert r.status_code == 200
+    assert r.text == TWIML
+    assert reg.call_count == 1
+    assert reg.call_args.kwargs["dynamic"]["call_sid"] == "CAtest"
+
+
+@patch("app.main.register_elevenlabs_call", side_effect=httpx.ReadTimeout("x"))
+def test_pine_connect_exhausts_retries_then_fail_safe(reg, client, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+    r = signed_post(client, "/api/pine-connect?attempt=3", CALL)
+    assert r.status_code == 200
     assert "having trouble connecting" in r.text
     assert "<Hangup" in r.text
+    assert "/api/pine-connect" not in r.text
+    assert "<Connect" not in r.text
 
 
 @patch("app.main.register_elevenlabs_call")
@@ -186,3 +208,11 @@ def test_send_text_send_failure_after_consent(h, client, tool_secret):
     r = tool_post(client, {"caller_number": "+15551230000", "message_type": "booking_link"})
     assert r.json() == {"ok": False, "reason": "send_failed"}
     h.assert_called_once()
+
+
+def test_register_call_timeout_default(monkeypatch):
+    from app import main
+    monkeypatch.delenv("ELEVENLABS_TIMEOUT_SECONDS", raising=False)
+    assert main.register_call_timeout() == 10.0
+    monkeypatch.setenv("ELEVENLABS_TIMEOUT_SECONDS", "12")
+    assert main.register_call_timeout() == 12.0
