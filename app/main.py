@@ -4,7 +4,9 @@ import re
 
 import httpx
 
-from fastapi import FastAPI, HTTPException, Request, Response
+import hmac
+
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse
@@ -87,11 +89,17 @@ def health():
 
 @app.post("/api/voice")
 async def voice(request: Request):
-    await verified_form(request)
+    form = await verified_form(request)
+    # Option 2 (ELEVENLABS_DIRECT_ANSWER): still ring FORWARD_TO_NUMBER first
+    # with the same Dial timeout and action, but skip the Polly "Connecting
+    # you now" line so the caller only hears ringback. If the shop number is
+    # unset, fall through to /api/dial-status as a miss (same as today).
+    # Default off: existing press-1 flow is unchanged.
     resp = VoiceResponse()
     forward = env("FORWARD_TO_NUMBER")
     if forward:
-        say(resp, "Thanks for calling. Connecting you now.")
+        if not flag("ELEVENLABS_DIRECT_ANSWER"):
+            say(resp, "Thanks for calling. Connecting you now.")
         dial = resp.dial(
             timeout=int(env("DIAL_TIMEOUT_SECONDS", "20")),
             action="/api/dial-status",
@@ -108,6 +116,10 @@ async def dial_status(request: Request):
     form = await verified_form(request)
     status = form.get("DialCallStatus") or request.query_params.get("DialCallStatus", "")
     caller = form.get("From", "")
+    # Option 2: on a miss, skip press-1 / Polly consent and hand off silently
+    # to Pine via register-call. Answered calls still just hang up.
+    if flag("ELEVENLABS_DIRECT_ANSWER") and status in MISSED_STATUSES and caller:
+        return await answer_with_pine(form)
     resp = VoiceResponse()
     if status in MISSED_STATUSES and caller:
         gather = resp.gather(input="dtmf speech", num_digits=1, action="/api/consent",
@@ -163,17 +175,27 @@ async def consent_route(request: Request):
     return twiml(resp)
 
 
-def register_elevenlabs_call(caller: str, called: str) -> str:
+PINE_CONSENT_VERSION = "2026-11-18-pine-option2"
+ALLOWED_MESSAGE_TYPES = {"booking_link"}
+REGISTER_CALL_FAIL_SAFE = (
+    "Sorry, we're having trouble connecting this call. Please try again in a moment."
+)
+
+
+def register_elevenlabs_call(caller: str, called: str, dynamic: dict | None = None) -> str:
     """Ask ElevenLabs for TwiML that connects this in-progress call to the agent."""
+    payload = {
+        "agent_id": env("ELEVENLABS_AGENT_ID") or DEFAULT_ELEVENLABS_AGENT_ID,
+        "from_number": caller,
+        "to_number": called,
+        "direction": "inbound",
+    }
+    if dynamic:
+        payload["conversation_initiation_client_data"] = {"dynamic_variables": dynamic}
     r = httpx.post(
         ELEVENLABS_REGISTER_CALL_URL,
         headers={"xi-api-key": env("ELEVENLABS_API_KEY")},
-        json={
-            "agent_id": env("ELEVENLABS_AGENT_ID") or DEFAULT_ELEVENLABS_AGENT_ID,
-            "from_number": caller,
-            "to_number": called,
-            "direction": "inbound",
-        },
+        json=payload,
         timeout=float(env("ELEVENLABS_TIMEOUT_SECONDS", "5")),
     )
     r.raise_for_status()
@@ -203,6 +225,96 @@ async def handoff(request: Request):
     # after=consented: CONFIRMATION (ends in "Goodbye.") was already spoken.
     resp.hangup()
     return twiml(resp)
+
+
+async def answer_with_pine(form: dict) -> Response:
+    """Silent answer: no greeting <Say>. Register with ElevenLabs and return its TwiML.
+
+    On register-call failure, speak one short fail-safe line and hang up so the
+    caller is not left in silence. That is the only Twilio TTS in this path.
+    """
+    caller = form.get("From", "")
+    called = form.get("To", "") or env("TWILIO_PHONE_NUMBER")
+    call_sid = form.get("CallSid", "")
+    log.info("direct-pine inbound call_sid=%s", call_sid)
+    if caller and called and env("ELEVENLABS_API_KEY"):
+        blocked = optout.is_blocked(caller)
+        try:
+            body = register_elevenlabs_call(
+                caller,
+                called,
+                dynamic={
+                    "caller_number": caller,
+                    "called_number": called,
+                    "call_sid": call_sid,
+                    "sms_opted_out": "true" if blocked else "false",
+                },
+            )
+            log.info("register-call ok call_sid=%s opted_out=%s", call_sid, blocked)
+            return Response(content=body, media_type="application/xml")
+        except Exception:
+            log.exception("register-call failed call_sid=%s", call_sid)
+    else:
+        log.error("direct-pine missing caller, called number, or API key; failing safe")
+    resp = VoiceResponse()
+    say(resp, REGISTER_CALL_FAIL_SAFE)
+    resp.hangup()
+    return twiml(resp)
+
+
+def _tool_secret_ok(provided: str | None) -> bool:
+    expected = env("ELEVENLABS_TOOL_SECRET")
+    if not expected or not provided:
+        return False
+    return hmac.compare_digest(provided, expected)
+
+
+@app.post("/api/tools/send-text")
+async def send_text_tool(request: Request, x_tool_secret: str | None = Header(default=None)):
+    """Server tool for Pine. Not attached to the agent in this draft.
+
+    Reuses sms_consent / sms_opt_outs and the existing STOP rule: a spoken yes
+    never clears a STOP; only START/UNSTOP by text does. No SMS is sent unless
+    a consent row is stored and the number is not blocked.
+    """
+    if not _tool_secret_ok(x_tool_secret):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    params = body["parameters"] if isinstance(body.get("parameters"), dict) else body
+    caller = str(params.get("caller_number") or params.get("from_number") or "").strip()
+    message_type = str(params.get("message_type") or "").strip().lower()
+    call_sid = str(params.get("call_sid") or body.get("conversation_id") or "").strip()
+    consent_answer = str(params.get("consent_answer") or "yes").strip()
+
+    if not caller or message_type not in ALLOWED_MESSAGE_TYPES:
+        return {"ok": False, "reason": "invalid_request"}
+
+    if optout.is_blocked(caller):
+        log.info("send-text blocked by opt-out for %s type=%s", caller, message_type)
+        return {"ok": False, "reason": "opted_out"}
+
+    record = consent.record_consent(
+        caller=caller,
+        call_sid=call_sid,
+        answer=f"pine_tool:{message_type}:{consent_answer}",
+        consented=True,
+        greeting_version=PINE_CONSENT_VERSION,
+    )
+    if not record["stored"]:
+        log.error("consent not stored for %s; skipping SMS", caller)
+        return {"ok": False, "reason": "consent_store_failed"}
+
+    try:
+        handle_missed_call(caller)
+        return {"ok": True, "reason": "sent", "message_type": message_type}
+    except Exception:
+        log.exception("send-text failed for %s", caller)
+        return {"ok": False, "reason": "send_failed"}
 
 
 @app.post("/api/sms")
