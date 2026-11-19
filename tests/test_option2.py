@@ -5,7 +5,7 @@ import pytest
 
 from app import consent as consent_store
 from app import optout
-from app.main import PINE_CONSENT_VERSION
+from app.main import PINE_CONSENT_VERSION, is_clear_sms_consent
 
 from .test_app import signed_post
 
@@ -247,6 +247,73 @@ def _send_text_capturing(client, payload):
     return response, records
 
 
+
+CONSENT_PHRASES = [
+    # Accept: required cases
+    ("Yeah, that's fine.", True),
+    ("Sure, go ahead", True),
+    ("Yes please", True),
+    ("Okay", True),
+    ("Uh huh", True),
+    ("Sounds good", True),
+    ("Text me", True),
+    ("Why not", True),
+    # Accept: additional clear affirmatives
+    ("yes", True),
+    ("yeah sure", True),
+    ("sure, text me", True),
+    ("Yes!", True),
+    ("that's fine", True),
+    ("it's fine", True),
+    ("yep", True),
+    ("yup", True),
+    ("alright", True),
+    ("all right", True),
+    ("go ahead", True),
+    ("do it", True),
+    ("send it", True),
+    ("that works", True),
+    ("perfect", True),
+    ("absolutely", True),
+    ("definitely", True),
+    ("of course", True),
+    ("Why not?", True),
+    ("mhm", True),
+    ("uh-huh", True),
+    ("please do", True),
+    ("works for me", True),
+    ("Yeah, go ahead and send it please", True),
+    # Refuse: required cases
+    ("No", False),
+    ("No thanks", False),
+    ("Not now", False),
+    ("Maybe later", False),
+    ("Yeah no", False),
+    ("Don't text me", False),
+    ("Stop", False),
+    ("", False),
+    ("Wait what?", False),
+    ("I'll call back", False),
+    # Refuse: additional negatives, hedges, and empties
+    ("yes, don't text me", False),
+    ("sure, not now", False),
+    ("maybe", False),
+    ("I guess", False),
+    ("I guess not", False),
+    ("hold on", False),
+    ("unsubscribe", False),
+    ("wait", False),
+    ("   ", False),
+    ("Can you send it?", False),
+]
+
+
+@pytest.mark.parametrize("quote,expected", CONSENT_PHRASES)
+def test_is_clear_sms_consent_phrases(quote, expected):
+    assert is_clear_sms_consent(quote) is expected
+    assert len(CONSENT_PHRASES) >= 25
+
+
 @pytest.mark.parametrize("payload", [
     {"caller_number": "+15551230000", "message_type": "booking_link", "call_sid": "CAtest"},
     {"parameters": {"caller_number": "+15551230000", "message_type": "booking_link"}},
@@ -264,7 +331,6 @@ def _send_text_capturing(client, payload):
     {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "yeah no"},
     {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "maybe"},
     {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "I guess"},
-    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "uh huh"},
     {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": True},
 ])
 @patch("app.main.handle_missed_call")
@@ -286,6 +352,8 @@ def test_send_text_refuses_without_clear_yes(h, client, tool_secret, payload):
     "Yeah, that's fine.",
     "that's fine",
     "it's fine",
+    "Uh huh",
+    "Sounds good",
 ])
 @patch("app.main.handle_missed_call")
 def test_send_text_sends_when_quote_is_clear_yes(h, client, tool_secret, quote):
