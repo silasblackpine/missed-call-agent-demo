@@ -176,6 +176,7 @@ def test_send_text_accepts_nested_parameters(h, client, tool_secret):
     r = tool_post(client, {"parameters": {
         "caller_number": "+15551230000",
         "message_type": "booking_link",
+        "consent_answer": "yes",
     }})
     assert r.json()["ok"] is True
     h.assert_called_once()
@@ -196,7 +197,11 @@ def test_send_text_skips_sms_if_consent_not_stored(h, client, tool_secret):
 
     consent_store.set_store(boom)
     try:
-        r = tool_post(client, {"caller_number": "+15551230000", "message_type": "booking_link"})
+        r = tool_post(client, {
+            "caller_number": "+15551230000",
+            "message_type": "booking_link",
+            "consent_answer": "yes",
+        })
     finally:
         consent_store.set_store(consent_store.log_store)
     assert r.json() == {"ok": False, "reason": "consent_store_failed"}
@@ -205,9 +210,95 @@ def test_send_text_skips_sms_if_consent_not_stored(h, client, tool_secret):
 
 @patch("app.main.handle_missed_call", side_effect=RuntimeError("twilio down"))
 def test_send_text_send_failure_after_consent(h, client, tool_secret):
-    r = tool_post(client, {"caller_number": "+15551230000", "message_type": "booking_link"})
+    r = tool_post(client, {
+        "caller_number": "+15551230000",
+        "message_type": "booking_link",
+        "consent_answer": "yes",
+    })
     assert r.json() == {"ok": False, "reason": "send_failed"}
     h.assert_called_once()
+
+
+def _send_text_capturing(client, payload):
+    records = []
+    consent_store.set_store(records.append)
+    try:
+        response = tool_post(client, payload)
+    finally:
+        consent_store.set_store(consent_store.log_store)
+    return response, records
+
+
+@pytest.mark.parametrize("payload", [
+    {"caller_number": "+15551230000", "message_type": "booking_link", "call_sid": "CAtest"},
+    {"parameters": {"caller_number": "+15551230000", "message_type": "booking_link"}},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": None},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": ""},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "   "},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "\n\t "},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "no"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "no thanks"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "don't text me"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "Don't text me"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "do not text me"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "not now"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "yes, don't text me"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "yeah no"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "maybe"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "I guess"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": "uh huh"},
+    {"caller_number": "+15551230000", "message_type": "booking_link", "consent_answer": True},
+])
+@patch("app.main.handle_missed_call")
+def test_send_text_refuses_without_clear_yes(h, client, tool_secret, payload):
+    response, records = _send_text_capturing(client, payload)
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "reason": "consent_required"}
+    h.assert_not_called()
+    assert records == []
+
+
+@pytest.mark.parametrize("quote", [
+    "yes",
+    "yeah sure",
+    "yeah",
+    "sure, text me",
+    "yes please",
+    "Yes!",
+])
+@patch("app.main.handle_missed_call")
+def test_send_text_sends_when_quote_is_clear_yes(h, client, tool_secret, quote):
+    response, records = _send_text_capturing(client, {
+        "caller_number": "+15551230000",
+        "message_type": "booking_link",
+        "call_sid": "CAtest",
+        "consent_answer": quote,
+    })
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "reason": "sent", "message_type": "booking_link"}
+    h.assert_called_once_with("+15551230000")
+    assert len(records) == 1
+    assert records[0]["consented"] is True
+    assert records[0]["answer"] == f"pine_tool:booking_link:{quote}"
+    assert records[0]["call_sid"] == "CAtest"
+    assert records[0]["caller"] == "+15551230000"
+    assert records[0]["greeting_version"] == PINE_CONSENT_VERSION
+    assert records[0]["timestamp_utc"]
+
+
+@patch("app.main.handle_missed_call")
+def test_send_text_opted_out_yes_still_blocked(h, client, tool_secret):
+    optout.handle_keyword("+15551230000", "STOP")
+    response, records = _send_text_capturing(client, {
+        "caller_number": "+15551230000",
+        "message_type": "booking_link",
+        "call_sid": "CAtest",
+        "consent_answer": "yes",
+    })
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "reason": "opted_out"}
+    h.assert_not_called()
+    assert records == []
 
 
 def test_register_call_timeout_default(monkeypatch):
