@@ -41,6 +41,8 @@ def test_direct_answer_rings_forward_without_polly(client, monkeypatch):
     assert "<Dial" in r.text and 'action="/api/dial-status"' in r.text
     assert "+19095551212" in r.text
     assert 'timeout="20"' in r.text
+    assert 'answerOnBridge="true"' in r.text
+    assert 'url="/api/voice/screen"' in r.text
     assert "Connecting you now" not in r.text
     assert "<Gather" not in r.text
     assert "<Connect" not in r.text
@@ -122,12 +124,28 @@ def test_pine_connect_exhausts_retries_then_fail_safe(reg, client, monkeypatch):
 def test_answered_dial_does_not_hand_off(reg, client, monkeypatch):
     monkeypatch.setenv("ELEVENLABS_DIRECT_ANSWER", "true")
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
-    r = signed_post(client, "/api/dial-status", {**CALL, "DialCallStatus": "completed"})
+    r = signed_post(client, "/api/dial-status", {
+        **CALL, "DialCallStatus": "completed", "DialBridged": "true",
+    })
     assert r.status_code == 200
     assert "<Connect" not in r.text
     assert "<Gather" not in r.text
     assert "<Hangup" in r.text
     reg.assert_not_called()
+
+
+@patch("app.main.register_elevenlabs_call", return_value=TWIML)
+def test_unbridged_completed_hands_off_to_pine(reg, client, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_DIRECT_ANSWER", "true")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+    r = signed_post(client, "/api/dial-status", {
+        **CALL, "DialCallStatus": "completed", "DialBridged": "false",
+    })
+    assert r.status_code == 200
+    assert r.text == TWIML
+    assert "<Say" not in r.text
+    assert "<Gather" not in r.text
+    reg.assert_called_once()
 
 
 def test_flag_off_dial_status_still_asks_consent(client, monkeypatch):

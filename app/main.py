@@ -18,8 +18,6 @@ log = logging.getLogger("missed_call")
 app = FastAPI(title="Missed-Call Agent Demo")
 storage.configure_from_env()
 
-MISSED_STATUSES = {"no-answer", "busy", "failed", "canceled"}
-
 GREETING_VERSION = "2026-11-18-a1"
 GREETING = (
     "Hi, you've reached Black Pine Lab. This call may be recorded. "
@@ -143,37 +141,77 @@ def health():
     return {"ok": True}
 
 
+SCREEN_PROMPT = "Missed-call line. Press 1 to take it."
+# Dial timeout is only the ring window. Screening is what stops voicemail
+# from counting as an answer; a slightly tighter default just shortens the race.
+DEFAULT_DIAL_TIMEOUT_SECONDS = 18
+
+
+def dial_was_bridged(form: dict) -> bool:
+    """True only when Twilio connected the caller to the callee.
+
+    After a Number url whisper, DialCallStatus is often "completed" even if
+    the child leg hung up during screening (carrier voicemail, a decline, or
+    no keypress). DialBridged is the field that distinguishes those cases.
+    """
+    return form.get("DialBridged", "").strip().lower() == "true"
+
+
 @app.post("/api/voice")
 async def voice(request: Request):
     form = await verified_form(request)
     # Ring FORWARD_TO_NUMBER first (same Dial timeout and action) with no
     # Polly "Connecting you now" preface — the caller only hears ringback.
+    # answerOnBridge keeps ringing during the callee-only screen whisper.
     # If the shop number is unset, fall through to /api/dial-status as a miss.
     resp = VoiceResponse()
     forward = env("FORWARD_TO_NUMBER")
     if forward:
         dial = resp.dial(
-            timeout=int(env("DIAL_TIMEOUT_SECONDS", "20")),
+            timeout=int(env("DIAL_TIMEOUT_SECONDS", str(DEFAULT_DIAL_TIMEOUT_SECONDS))),
             action="/api/dial-status",
             method="POST",
+            answer_on_bridge=True,
         )
-        dial.number(forward)
+        dial.number(forward, url="/api/voice/screen")
     else:
         resp.redirect("/api/dial-status?DialCallStatus=no-answer", method="POST")
+    return twiml(resp)
+
+
+@app.post("/api/voice/screen")
+async def voice_screen(request: Request):
+    """Callee-only whisper: press 1 to bridge, otherwise hang up this leg.
+
+    The inbound caller keeps hearing ringback (answerOnBridge) and never
+    hears this prompt. Empty TwiML after a 1 lets Twilio bridge the calls.
+    """
+    form = await verified_form(request)
+    digits = (form.get("Digits") or "").strip()
+    resp = VoiceResponse()
+    if digits == "1":
+        return twiml(resp)
+    if digits:
+        resp.hangup()
+        return twiml(resp)
+    gather = resp.gather(num_digits=1, timeout=5, action="/api/voice/screen", method="POST")
+    say(gather, SCREEN_PROMPT)
+    resp.hangup()
     return twiml(resp)
 
 
 @app.post("/api/dial-status")
 async def dial_status(request: Request):
     form = await verified_form(request)
-    status = form.get("DialCallStatus") or request.query_params.get("DialCallStatus", "")
     caller = form.get("From", "")
-    # Option 2: on a miss, skip press-1 / Polly consent and hand off silently
-    # to Pine via register-call. Answered calls still just hang up.
-    if flag("ELEVENLABS_DIRECT_ANSWER") and status in MISSED_STATUSES and caller:
+    # A miss is any result that was not actually bridged, including
+    # DialCallStatus=completed after the screen leg hung up. Bridged calls
+    # end here. Option 2 then hands off silently to Pine; otherwise press-1.
+    missed = bool(caller) and not dial_was_bridged(form)
+    if flag("ELEVENLABS_DIRECT_ANSWER") and missed:
         return await answer_with_pine(form)
     resp = VoiceResponse()
-    if status in MISSED_STATUSES and caller:
+    if missed:
         gather = resp.gather(input="dtmf speech", num_digits=1, action="/api/consent",
                              method="POST", timeout=6, speech_timeout="auto")
         say(gather, GREETING)

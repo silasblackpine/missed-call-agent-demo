@@ -41,6 +41,7 @@ sequenceDiagram
 - Every webhook is verified with Twilio's `X-Twilio-Signature`.
 - Optional hooks can fail without breaking the call flow.
 - If `FORWARD_TO_NUMBER` is blank, every call is treated as missed (handy for demos).
+- The forwarded leg uses call screening (`answerOnBridge` plus a `/api/voice/screen` whisper). Only a press-1 on that leg bridges the caller. A decline, a timeout, or carrier voicemail hangs up the child leg and is treated as a miss (`DialBridged`, not `DialCallStatus=completed`). The caller keeps hearing ringback and never hears the whisper.
 
 ## SMS consent (verbal opt-in)
 
