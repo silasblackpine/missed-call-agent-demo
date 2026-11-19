@@ -28,6 +28,10 @@ def test_voice_dials_forward_number(client, monkeypatch):
     assert r.status_code == 200
     assert "<Dial" in r.text and "+15550001111" in r.text
     assert 'action="/api/dial-status"' in r.text
+    assert 'answerOnBridge="true"' in r.text
+    assert 'url="/api/voice/screen"' in r.text
+    assert 'timeout="18"' in r.text
+    assert "<Gather" not in r.text
 
 
 def test_voice_without_forward_redirects_to_missed(client):
@@ -104,7 +108,18 @@ def test_consent_record_logged(client):
 @patch("app.integrations.get_twilio_client")
 def test_answered_call_sends_nothing(mock_client, client):
     signed_post(client, "/api/dial-status",
-                {"From": "+15551234567", "DialCallStatus": "completed"})
+                {"From": "+15551234567", "DialCallStatus": "completed",
+                 "DialBridged": "true"})
+    mock_client.assert_not_called()
+
+
+@patch("app.integrations.get_twilio_client")
+def test_unbridged_completed_prompts_consent_without_texting(mock_client, client):
+    r = signed_post(client, "/api/dial-status",
+                    {"From": "+15551234567", "DialCallStatus": "completed",
+                     "DialBridged": "false"})
+    assert r.status_code == 200
+    assert "<Gather" in r.text and 'action="/api/consent"' in r.text
     mock_client.assert_not_called()
 
 
@@ -166,3 +181,39 @@ def test_say_voice_configurable(monkeypatch):
     r = VoiceResponse()
     main.say(r, "hi")
     assert 'voice="Polly.Matthew-Neural"' in str(r)
+
+
+def test_screen_rejects_bad_signature(client):
+    r = client.post("/api/voice/screen", data={"From": "+15551234567"},
+                    headers={"X-Twilio-Signature": "bogus"})
+    assert r.status_code == 403
+
+
+def test_screen_prompts_and_hangs_up_without_digit(client):
+    r = signed_post(client, "/api/voice/screen", {"From": "+15550001111"})
+    assert r.status_code == 200
+    assert "<Gather" in r.text
+    assert 'numDigits="1"' in r.text
+    assert 'timeout="5"' in r.text
+    assert 'action="/api/voice/screen"' in r.text
+    assert "Missed-call line. Press 1 to take it." in r.text
+    assert "<Hangup" in r.text
+
+
+def test_screen_digit_1_returns_empty_twiml(client):
+    r = signed_post(client, "/api/voice/screen",
+                    {"From": "+15550001111", "Digits": "1"})
+    assert r.status_code == 200
+    assert "<Hangup" not in r.text
+    assert "<Gather" not in r.text
+    assert "<Say" not in r.text
+    assert "<Dial" not in r.text
+    assert "<Response" in r.text
+
+
+def test_screen_other_digit_hangs_up(client):
+    r = signed_post(client, "/api/voice/screen",
+                    {"From": "+15550001111", "Digits": "2"})
+    assert r.status_code == 200
+    assert "<Hangup" in r.text
+    assert "<Gather" not in r.text
