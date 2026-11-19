@@ -46,66 +46,102 @@ def is_yes(digits: str, speech: str) -> bool:
     return bool(re.search(r"\byes\b", (speech or "").lower()))
 
 
-# Closed vocabulary for Pine's send_text consent quote. A quote is affirmative
-# only when it is a short string of these words and contains a clear yes.
-# Any negation token refuses the whole quote, including "yes, don't text me".
-_CONSENT_NEGATIONS = {
+# Lenient spoken-consent check for Pine's send_text quote.
+# Negation or deferral always wins. Otherwise a clear affirmative
+# marker is enough, regardless of filler words. Anything else is refused.
+_CONSENT_NEGATION_TOKENS = {
     "no", "nope", "nah", "not", "never", "dont", "wont", "cant", "cannot",
-    "wouldnt", "shouldnt", "stop", "cancel", "decline", "declined",
-    "refuse", "refused", "negative", "nothing", "neither", "nobody",
+    "wouldnt", "shouldnt", "stop", "later", "maybe", "wait", "unsubscribe",
+    "guess", "cancel", "decline", "declined", "refuse", "refused",
+    "negative", "nothing", "neither", "nobody",
 }
-_CONSENT_CORE = {
+_CONSENT_NEGATION_PHRASES = (
+    ("not", "now"),
+    ("no", "thanks"),
+    ("no", "thank"),
+    ("hold", "on"),
+    ("i", "guess"),
+)
+_CONSENT_AFFIRM_TOKENS = {
     "yes", "yeah", "yea", "yah", "yep", "yup", "ya",
-    "sure", "ok", "okay", "absolutely", "definitely", "alright",
-    "agree", "agreed", "fine",
+    "sure", "ok", "okay", "alright", "fine", "please",
+    "perfect", "absolutely", "definitely", "mhm", "mmhmm", "uhhuh",
 }
-_CONSENT_FILLER = {
-    "please", "text", "me", "send", "it", "that", "the", "a", "an", "link",
-    "thanks", "thank", "you", "go", "ahead", "sounds", "good",
-    "of", "course", "do", "i", "id", "would", "like", "to",
-    "my", "this", "booking", "great", "perfect", "cool", "thing", "and",
-    "uh", "um", "oh", "well", "number", "now",
-    "thats", "its",
-}
-_CONSENT_MAX_TOKENS = 12
-_CONSENT_REQUEST_VERBS = {"text", "send"}
-_CONSENT_REQUEST_OBJECTS = {"me", "it", "that", "this", "link"}
+_CONSENT_AFFIRM_PHRASES = (
+    ("go", "ahead"),
+    ("do", "it"),
+    ("send", "it"),
+    ("sounds", "good"),
+    ("that", "works"),
+    ("of", "course"),
+    ("why", "not"),
+    ("uh", "huh"),
+    ("please", "do"),
+    ("text", "me"),
+    ("works", "for", "me"),
+    ("all", "right"),
+)
+_CONSENT_WHY_NOT = ("why", "not")
 
 
-def _consent_tokens(answer: str) -> list[str]:
-    """Lowercase a quote and split on punctuation. Apostrophes are removed
-    so "don't" and "don’t" both become the negation token "dont"."""
-    lowered = answer.lower().replace("’", "'").replace("`", "'").replace("'", "")
-    return re.sub(r"[^a-z0-9]+", " ", lowered).split()
+def _consent_tokens(answer: str) -> tuple[list[str], bool]:
+    """Lowercase a quote, strip apostrophes, and split on punctuation.
+
+    Apostrophes are removed so "don't" and "don’t" both become "dont".
+    Returns (tokens, has_question_mark).
+    """
+    lowered = answer.lower().replace("’", "'").replace("`", "'")
+    has_question = "?" in lowered
+    stripped = lowered.replace("'", "")
+    tokens = re.sub(r"[^a-z0-9]+", " ", stripped).split()
+    return tokens, has_question
+
+
+def _has_ngram(tokens: list[str], phrase: tuple[str, ...]) -> bool:
+    n = len(phrase)
+    phrase_list = list(phrase)
+    return any(tokens[i:i + n] == phrase_list for i in range(len(tokens) - n + 1))
+
+
+def _strip_ngram(tokens: list[str], phrase: tuple[str, ...]) -> list[str]:
+    n = len(phrase)
+    phrase_list = list(phrase)
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i:i + n] == phrase_list:
+            i += n
+        else:
+            out.append(tokens[i])
+            i += 1
+    return out
 
 
 def is_clear_sms_consent(answer: object) -> bool:
-    """True only for a short quote of a clear yes.
+    """True for a spoken quote that clearly agrees to the text.
 
-    Missing, non-string, blank, negated, or unrecognized wording is not
-    consent. Ambiguous phrases are refused.
+    Missing, non-string, or blank quotes are not consent. A negation or
+    deferral (including "yeah no" or "sure, not now") refuses the whole
+    quote. A question mark refuses unless the words are just "why not".
+    Otherwise any affirmative marker is enough, even with filler words.
+    Quotes with no affirmative marker are refused.
     """
     if not isinstance(answer, str) or not answer.strip():
         return False
-    tokens = _consent_tokens(answer)
-    if not tokens or len(tokens) > _CONSENT_MAX_TOKENS:
+    tokens, has_question = _consent_tokens(answer)
+    if not tokens:
         return False
-    if any(token in _CONSENT_NEGATIONS for token in tokens):
+    # "why not" is an affirmative; don't treat its "not" as a negation.
+    remainder = _strip_ngram(tokens, _CONSENT_WHY_NOT)
+    if has_question and remainder:
         return False
-    allowed = _CONSENT_CORE | _CONSENT_FILLER
-    if any(token not in allowed for token in tokens):
+    if any(token in _CONSENT_NEGATION_TOKENS for token in remainder):
         return False
-    if any(token in _CONSENT_CORE for token in tokens):
+    if any(_has_ngram(remainder, phrase) for phrase in _CONSENT_NEGATION_PHRASES):
+        return False
+    if any(token in _CONSENT_AFFIRM_TOKENS for token in tokens):
         return True
-    has_request = (
-        any(token in _CONSENT_REQUEST_VERBS for token in tokens)
-        and any(token in _CONSENT_REQUEST_OBJECTS for token in tokens)
-    )
-    has_go_ahead = "go" in tokens and "ahead" in tokens
-    has_sounds_good = "sounds" in tokens and "good" in tokens
-    has_of_course = "of" in tokens and "course" in tokens
-    has_please_do = "please" in tokens and "do" in tokens
-    return has_request or has_go_ahead or has_sounds_good or has_of_course or has_please_do
+    return any(_has_ngram(tokens, phrase) for phrase in _CONSENT_AFFIRM_PHRASES)
 
 
 async def verified_form(request: Request) -> dict:
