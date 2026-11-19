@@ -66,9 +66,20 @@ def test_consent_digit_1_sends_sms(mock_client, client):
     assert "Goodbye." not in r.text
     kwargs = tw.messages.create.call_args.kwargs
     assert kwargs["to"] == "+15551234567"
-    assert kwargs["body"] == ("Hi, this is Black Pine Lab, sorry we missed your call! "
-                              "You can book a time here: https://calendly.com/demo/intro "
-                              "or reply with how we can help. Reply STOP to opt out.")
+    expected = (
+        "Hi, this is Black Pine Lab. "
+        "Book a time here: https://calendly.com/demo/intro "
+        "or reply with how we can help. Reply STOP to opt out. "
+        "Terms: blackpinelab.com/terms Privacy: blackpinelab.com/privacy"
+    )
+    assert kwargs["body"] == expected
+    assert "sorry we missed" not in kwargs["body"].lower()
+    assert "Black Pine Lab" in kwargs["body"]
+    assert "Reply STOP to opt out" in kwargs["body"]
+    assert "blackpinelab.com/terms" in kwargs["body"]
+    assert "blackpinelab.com/privacy" in kwargs["body"]
+    # GSM-7 single segment is 160; concatenated cap used here is 2 segments (306).
+    assert len(kwargs["body"]) <= 306
 
 
 @patch("app.integrations.get_twilio_client")

@@ -283,6 +283,9 @@ def test_send_text_refuses_without_clear_yes(h, client, tool_secret, payload):
     "sure, text me",
     "yes please",
     "Yes!",
+    "Yeah, that's fine.",
+    "that's fine",
+    "it's fine",
 ])
 @patch("app.main.handle_missed_call")
 def test_send_text_sends_when_quote_is_clear_yes(h, client, tool_secret, quote):

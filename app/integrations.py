@@ -19,9 +19,10 @@ def get_twilio_client():
 
 def send_booking_sms(to_number: str) -> str:
     body = (
-        "Hi, this is Black Pine Lab, sorry we missed your call! "
-        f"You can book a time here: {env('CALENDLY_URL')} "
-        "or reply with how we can help. Reply STOP to opt out."
+        "Hi, this is Black Pine Lab. "
+        f"Book a time here: {env('CALENDLY_URL')} "
+        "or reply with how we can help. Reply STOP to opt out. "
+        "Terms: blackpinelab.com/terms Privacy: blackpinelab.com/privacy"
     )
     msg = get_twilio_client().messages.create(
         to=to_number, from_=env("TWILIO_PHONE_NUMBER"), body=body

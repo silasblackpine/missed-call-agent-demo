@@ -65,6 +65,7 @@ _CONSENT_FILLER = {
     "of", "course", "do", "i", "id", "would", "like", "to",
     "my", "this", "booking", "great", "perfect", "cool", "thing", "and",
     "uh", "um", "oh", "well", "number", "now",
+    "thats", "its",
 }
 _CONSENT_MAX_TOKENS = 12
 _CONSENT_REQUEST_VERBS = {"text", "send"}
