@@ -181,7 +181,7 @@ def health():
 SCREEN_PROMPT = "Missed-call line. Press 1 to take it."
 # Dial timeout is only the ring window. Screening is what stops voicemail
 # from counting as an answer; a slightly tighter default just shortens the race.
-DEFAULT_DIAL_TIMEOUT_SECONDS = 18
+DEFAULT_DIAL_TIMEOUT_SECONDS = 10
 
 
 def dial_was_bridged(form: dict) -> bool:
