@@ -6,6 +6,27 @@ from app import integrations
 
 BASE = "https://demo.example.com"
 
+# GSM 03.38 default alphabet and extension table. Extension characters take two septets.
+_GSM7_BASIC = set(
+    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
+    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
+)
+_GSM7_EXT = set("^{}\\[~]|€")
+
+
+def _gsm7_segments(text: str) -> int:
+    septets = 0
+    for ch in text:
+        if ch in _GSM7_BASIC:
+            septets += 1
+        elif ch in _GSM7_EXT:
+            septets += 2
+        else:
+            raise AssertionError(f"non-GSM-7 character: {ch!r}")
+    if septets <= 160:
+        return 1
+    return (septets + 152) // 153
+
 
 def signed_post(client, path, data):
     sig = RequestValidator("test_token").compute_signature(BASE + path, data)
@@ -30,8 +51,29 @@ def test_voice_dials_forward_number(client, monkeypatch):
     assert 'action="/api/dial-status"' in r.text
     assert 'answerOnBridge="true"' in r.text
     assert 'url="/api/voice/screen"' in r.text
-    assert 'timeout="18"' in r.text
+    assert 'timeout="10"' in r.text
     assert "<Gather" not in r.text
+
+
+def test_default_dial_timeout_keeps_screen_whisper(client, monkeypatch):
+    """A 10s dial is only the ring window. Screening still whispers and gathers."""
+    monkeypatch.delenv("DIAL_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("FORWARD_TO_NUMBER", "+15550001111")
+    voice = signed_post(client, "/api/voice", {"From": "+15551234567", "CallSid": "CA1"})
+    assert 'timeout="10"' in voice.text
+    assert 'answerOnBridge="true"' in voice.text
+    assert 'url="/api/voice/screen"' in voice.text
+    screen = signed_post(client, "/api/voice/screen", {"From": "+15550001111", "CallSid": "CA1"})
+    assert "Missed-call line. Press 1 to take it." in screen.text
+    assert 'numDigits="1"' in screen.text
+    assert 'timeout="5"' in screen.text
+    assert 'action="/api/voice/screen"' in screen.text
+    assert "<Hangup" in screen.text
+    pressed = signed_post(client, "/api/voice/screen",
+                          {"From": "+15550001111", "Digits": "1", "CallSid": "CA1"})
+    assert "<Hangup" not in pressed.text
+    assert "<Gather" not in pressed.text
+    assert "<Say" not in pressed.text
 
 
 def test_voice_without_forward_redirects_to_missed(client):
@@ -70,16 +112,42 @@ def test_consent_digit_1_sends_sms(mock_client, client):
         "Hi, this is Black Pine Lab. "
         "Book a time here: https://calendly.com/demo/intro "
         "or reply with how we can help. Reply STOP to opt out. "
+        "Msg & data rates may apply. Reply HELP for help. "
         "Terms: blackpinelab.com/terms Privacy: blackpinelab.com/privacy"
     )
     assert kwargs["body"] == expected
     assert "sorry we missed" not in kwargs["body"].lower()
     assert "Black Pine Lab" in kwargs["body"]
     assert "Reply STOP to opt out" in kwargs["body"]
+    assert "Reply HELP for help." in kwargs["body"]
+    assert "Msg & data rates may apply." in kwargs["body"]
     assert "blackpinelab.com/terms" in kwargs["body"]
     assert "blackpinelab.com/privacy" in kwargs["body"]
     # GSM-7 single segment is 160; concatenated cap used here is 2 segments (306).
     assert len(kwargs["body"]) <= 306
+    assert _gsm7_segments(kwargs["body"]) <= 2
+
+
+@patch("app.integrations.get_twilio_client")
+def test_booking_sms_contains_stop_help_and_rates(mock_client, client, monkeypatch):
+    """Production booking link stays within two GSM-7 segments and keeps the disclosures."""
+    monkeypatch.setenv("CALENDLY_URL", "https://calendly.com/blackpinelab/15min")
+    tw = _sms_mock(mock_client)
+    signed_post(client, "/api/consent",
+                {"From": "+15551234567", "Digits": "1", "CallSid": "CA3"})
+    body = tw.messages.create.call_args.kwargs["body"]
+    assert body == (
+        "Hi, this is Black Pine Lab. "
+        "Book a time here: https://calendly.com/blackpinelab/15min "
+        "or reply with how we can help. Reply STOP to opt out. "
+        "Msg & data rates may apply. Reply HELP for help. "
+        "Terms: blackpinelab.com/terms Privacy: blackpinelab.com/privacy"
+    )
+    assert "Reply STOP to opt out" in body
+    assert "Reply HELP for help." in body
+    assert "Msg & data rates may apply." in body
+    assert _gsm7_segments(body) <= 2
+    assert len(body) == 252
 
 
 @patch("app.integrations.get_twilio_client")

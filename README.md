@@ -16,7 +16,7 @@ sequenceDiagram
     participant Resend
     Caller->>Twilio: Calls business number
     Twilio->>App: POST /api/voice (signed)
-    App-->>Twilio: TwiML <Dial timeout=20>
+    App-->>Twilio: TwiML <Dial timeout=10>
     Twilio->>Phone: Rings
     Phone--xTwilio: No answer / busy
     Twilio->>App: POST /api/dial-status (DialCallStatus=no-answer)
@@ -26,7 +26,7 @@ sequenceDiagram
     App->>App: Log consent record (caller, UTC time, answer, CallSid, greeting_version)
     alt Pressed 1 or said yes (and not opted out)
         App->>Twilio: Send SMS with Calendly link
-        Twilio->>Caller: "Hi, this is Black Pine Lab. Book a time here: ... Reply STOP to opt out. Terms: blackpinelab.com/terms Privacy: blackpinelab.com/privacy"
+        Twilio->>Caller: "Hi, this is Black Pine Lab. Book a time here: ... Reply STOP to opt out. Msg & data rates may apply. Reply HELP for help. Terms: blackpinelab.com/terms Privacy: blackpinelab.com/privacy"
     else No answer / other input
         App-->>Twilio: Polite goodbye, no text
     end
@@ -54,7 +54,7 @@ No text is sent automatically. After a missed call the caller hears:
   > Thanks. If your number is eligible, you'll get a Black Pine Lab booking-link text. Message and data rates may apply. Previously opted out? Text START to this number first. One moment.
 
 - Any other input or no input: no text, polite goodbye.
-- SMS: `Hi, this is Black Pine Lab. Book a time here: {CALENDLY_URL} or reply with how we can help. Reply STOP to opt out. Terms: blackpinelab.com/terms Privacy: blackpinelab.com/privacy`
+- SMS: `Hi, this is Black Pine Lab. Book a time here: {CALENDLY_URL} or reply with how we can help. Reply STOP to opt out. Msg & data rates may apply. Reply HELP for help. Terms: blackpinelab.com/terms Privacy: blackpinelab.com/privacy`
 - Every answer is written as a JSON consent record (`caller`, `timestamp_utc`, `answer`, `call_sid`, `consented`, `greeting_version`) to the `missed_call.consent` logger. `greeting_version` (currently `2026-11-18-a1`) records which script the caller heard, so consent can be matched to the published opt-in page. Plug in a persistent store with `app.consent.set_store(fn)`.
 
 ## Inbound SMS keywords (`/api/sms`)
