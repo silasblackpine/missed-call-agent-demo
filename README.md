@@ -41,7 +41,7 @@ sequenceDiagram
 - Every webhook is verified with Twilio's `X-Twilio-Signature`.
 - Optional hooks can fail without breaking the call flow.
 - If `FORWARD_TO_NUMBER` is blank, every call is treated as missed (handy for demos).
-- The forwarded leg uses call screening (`answerOnBridge` plus a `/api/voice/screen` whisper). Only a press-1 on that leg bridges the caller. A decline, a timeout, or carrier voicemail hangs up the child leg and is treated as a miss (`DialBridged`, not `DialCallStatus=completed`). The caller keeps hearing ringback and never hears the whisper.
+- The forwarded leg uses call screening (`answerOnBridge` plus a `/api/voice/screen` whisper). `<Dial>` sets `callerId` to `TWILIO_PHONE_NUMBER` when that variable is set, so the owner's phone shows the business number. The whisper is "Missed-call line, caller ending 6 3 9 6. Press 1 to take it." using the original caller's last four digits. A missing or withheld number uses "Missed-call line. Press 1 to take it." Only a press-1 on that leg bridges the caller. A decline, a timeout, or carrier voicemail hangs up the child leg and is treated as a miss (`DialBridged`, not `DialCallStatus=completed`). The caller keeps hearing ringback and never hears the whisper. The ring window stays 10 seconds.
 
 ## SMS consent (verbal opt-in)
 
@@ -140,7 +140,7 @@ In Twilio Console → Phone Numbers → Manage → Active numbers → your numbe
 | Variable | Required | Purpose |
 |---|---|---|
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | yes | Twilio API + signature validation |
-| `TWILIO_PHONE_NUMBER` | yes | Number SMS is sent from (E.164) |
+| `TWILIO_PHONE_NUMBER` | yes | Number SMS is sent from, and the caller ID on the forwarded leg (E.164). Empty value omits `callerId` |
 | `PUBLIC_BASE_URL` | yes | Public URL used for signature validation |
 | `CALENDLY_URL` | yes | Booking link texted to callers |
 | `BUSINESS_NAME` | no | Used in the SMS |
