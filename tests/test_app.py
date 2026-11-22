@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlencode
 
 from twilio.request_validator import RequestValidator
 
@@ -45,32 +46,62 @@ def test_rejects_bad_signature(client):
 
 def test_voice_dials_forward_number(client, monkeypatch):
     monkeypatch.setenv("FORWARD_TO_NUMBER", "+15550001111")
-    r = signed_post(client, "/api/voice", {"From": "+15551234567"})
+    r = signed_post(client, "/api/voice", {"From": "+15551236396"})
     assert r.status_code == 200
     assert "<Dial" in r.text and "+15550001111" in r.text
     assert 'action="/api/dial-status"' in r.text
     assert 'answerOnBridge="true"' in r.text
-    assert 'url="/api/voice/screen"' in r.text
+    assert 'callerId="+18005550100"' in r.text
+    assert 'url="/api/voice/screen?caller=%2B15551236396"' in r.text
     assert 'timeout="10"' in r.text
     assert "<Gather" not in r.text
+
+
+def test_voice_omits_caller_id_when_business_number_blank(client, monkeypatch):
+    monkeypatch.setenv("FORWARD_TO_NUMBER", "+15550001111")
+    for value in ("", "   "):
+        monkeypatch.setenv("TWILIO_PHONE_NUMBER", value)
+        r = signed_post(client, "/api/voice", {"From": "+15551236396"})
+        assert r.status_code == 200
+        assert "callerId" not in r.text
+        assert 'timeout="10"' in r.text
+        assert 'answerOnBridge="true"' in r.text
+        assert 'url="/api/voice/screen?caller=%2B15551236396"' in r.text
+
+
+def test_voice_screen_url_omits_caller_when_from_missing(client, monkeypatch):
+    monkeypatch.setenv("FORWARD_TO_NUMBER", "+15550001111")
+    r = signed_post(client, "/api/voice", {})
+    assert r.status_code == 200
+    assert 'url="/api/voice/screen"' in r.text
+    assert "caller=" not in r.text
+    assert 'callerId="+18005550100"' in r.text
+    assert 'timeout="10"' in r.text
 
 
 def test_default_dial_timeout_keeps_screen_whisper(client, monkeypatch):
     """A 10s dial is only the ring window. Screening still whispers and gathers."""
     monkeypatch.delenv("DIAL_TIMEOUT_SECONDS", raising=False)
     monkeypatch.setenv("FORWARD_TO_NUMBER", "+15550001111")
-    voice = signed_post(client, "/api/voice", {"From": "+15551234567", "CallSid": "CA1"})
+    voice = signed_post(client, "/api/voice", {"From": "+15551236396", "CallSid": "CA1"})
     assert 'timeout="10"' in voice.text
     assert 'answerOnBridge="true"' in voice.text
-    assert 'url="/api/voice/screen"' in voice.text
-    screen = signed_post(client, "/api/voice/screen", {"From": "+15550001111", "CallSid": "CA1"})
-    assert "Missed-call line. Press 1 to take it." in screen.text
+    assert 'callerId="+18005550100"' in voice.text
+    assert 'url="/api/voice/screen?caller=%2B15551236396"' in voice.text
+    screen = signed_post(
+        client,
+        "/api/voice/screen?caller=%2B15551236396",
+        {"From": "+18005550100", "CallSid": "CA1"},
+    )
+    assert "Missed-call line, caller ending 6 3 9 6. Press 1 to take it." in screen.text
+    assert "Missed-call line. Press 1 to take it." not in screen.text
     assert 'numDigits="1"' in screen.text
     assert 'timeout="5"' in screen.text
     assert 'action="/api/voice/screen"' in screen.text
+    assert "caller=" not in screen.text
     assert "<Hangup" in screen.text
     pressed = signed_post(client, "/api/voice/screen",
-                          {"From": "+15550001111", "Digits": "1", "CallSid": "CA1"})
+                          {"From": "+18005550100", "Digits": "1", "CallSid": "CA1"})
     assert "<Hangup" not in pressed.text
     assert "<Gather" not in pressed.text
     assert "<Say" not in pressed.text
@@ -269,14 +300,31 @@ def test_screen_rejects_bad_signature(client):
 
 
 def test_screen_prompts_and_hangs_up_without_digit(client):
-    r = signed_post(client, "/api/voice/screen", {"From": "+15550001111"})
+    """The forwarded leg's From is the business caller ID, so it is not spoken."""
+    r = signed_post(client, "/api/voice/screen", {"From": "+18005550100"})
     assert r.status_code == 200
     assert "<Gather" in r.text
     assert 'numDigits="1"' in r.text
     assert 'timeout="5"' in r.text
     assert 'action="/api/voice/screen"' in r.text
     assert "Missed-call line. Press 1 to take it." in r.text
+    assert "caller ending" not in r.text
     assert "<Hangup" in r.text
+
+
+def test_screen_whisper_falls_back_when_caller_withheld(client):
+    for caller in ("", "anonymous", "Anonymous", "restricted", "unknown", "+266696687", "12"):
+        path = "/api/voice/screen"
+        if caller:
+            path += "?" + urlencode({"caller": caller})
+        r = signed_post(client, path, {"From": "+18005550100"})
+        assert r.status_code == 200, caller
+        assert "Missed-call line. Press 1 to take it." in r.text
+        assert "caller ending" not in r.text
+        assert 'numDigits="1"' in r.text
+        assert 'timeout="5"' in r.text
+        assert 'action="/api/voice/screen"' in r.text
+        assert "<Hangup" in r.text
 
 
 def test_screen_digit_1_returns_empty_twiml(client):

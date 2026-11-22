@@ -1,6 +1,7 @@
 """Missed-call text-back agent: Twilio voice webhooks -> SMS booking link."""
 import logging
 import re
+from urllib.parse import urlencode
 
 import httpx
 
@@ -182,6 +183,47 @@ SCREEN_PROMPT = "Missed-call line. Press 1 to take it."
 # Dial timeout is only the ring window. Screening is what stops voicemail
 # from counting as an answer; a slightly tighter default just shortens the race.
 DEFAULT_DIAL_TIMEOUT_SECONDS = 10
+# Carriers withhold caller ID as these words, or as the keypad spelling.
+_WITHHELD_CALLER_WORDS = ("anonymous", "unknown", "restricted", "unavailable", "withheld", "private")
+_WITHHELD_CALLER_DIGITS = frozenset({
+    "266696687",    # ANONYMOUS
+    "7378742833",   # RESTRICTED
+    "86282452253",  # UNAVAILABLE
+    "8656696",      # UNKNOWN
+})
+
+
+def caller_last_four(number: str) -> str:
+    """Space-separated last four digits, or "" when the number cannot be spoken."""
+    raw = (number or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if any(word in lowered for word in _WITHHELD_CALLER_WORDS):
+        return ""
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) < 4 or digits in _WITHHELD_CALLER_DIGITS:
+        return ""
+    return " ".join(digits[-4:])
+
+
+def screen_prompt_for(caller: str) -> str:
+    last4 = caller_last_four(caller)
+    if not last4:
+        return SCREEN_PROMPT
+    return f"Missed-call line, caller ending {last4}. Press 1 to take it."
+
+
+def screen_whisper_url(caller: str) -> str:
+    """Screen URL for the forwarded leg.
+
+    That request's From is the Dial callerId, so the original caller is
+    passed on the query string (URL-encoded) for the whisper.
+    """
+    caller = (caller or "").strip()
+    if not caller:
+        return "/api/voice/screen"
+    return "/api/voice/screen?" + urlencode({"caller": caller})
 
 
 def dial_was_bridged(form: dict) -> bool:
@@ -200,17 +242,23 @@ async def voice(request: Request):
     # Ring FORWARD_TO_NUMBER first (same Dial timeout and action) with no
     # Polly "Connecting you now" preface — the caller only hears ringback.
     # answerOnBridge keeps ringing during the callee-only screen whisper.
+    # callerId is the Twilio business number so the owner's carrier presents
+    # that line. An empty TWILIO_PHONE_NUMBER omits callerId.
     # If the shop number is unset, fall through to /api/dial-status as a miss.
     resp = VoiceResponse()
     forward = env("FORWARD_TO_NUMBER")
     if forward:
-        dial = resp.dial(
-            timeout=int(env("DIAL_TIMEOUT_SECONDS", str(DEFAULT_DIAL_TIMEOUT_SECONDS))),
-            action="/api/dial-status",
-            method="POST",
-            answer_on_bridge=True,
-        )
-        dial.number(forward, url="/api/voice/screen")
+        dial_kwargs = {
+            "timeout": int(env("DIAL_TIMEOUT_SECONDS", str(DEFAULT_DIAL_TIMEOUT_SECONDS))),
+            "action": "/api/dial-status",
+            "method": "POST",
+            "answer_on_bridge": True,
+        }
+        business_number = env("TWILIO_PHONE_NUMBER")
+        if business_number:
+            dial_kwargs["caller_id"] = business_number
+        dial = resp.dial(**dial_kwargs)
+        dial.number(forward, url=screen_whisper_url(form.get("From", "")))
     else:
         resp.redirect("/api/dial-status?DialCallStatus=no-answer", method="POST")
     return twiml(resp)
@@ -222,6 +270,7 @@ async def voice_screen(request: Request):
 
     The inbound caller keeps hearing ringback (answerOnBridge) and never
     hears this prompt. Empty TwiML after a 1 lets Twilio bridge the calls.
+    `caller` is the original From from the parent /api/voice request.
     """
     form = await verified_form(request)
     digits = (form.get("Digits") or "").strip()
@@ -232,7 +281,7 @@ async def voice_screen(request: Request):
         resp.hangup()
         return twiml(resp)
     gather = resp.gather(num_digits=1, timeout=5, action="/api/voice/screen", method="POST")
-    say(gather, SCREEN_PROMPT)
+    say(gather, screen_prompt_for(request.query_params.get("caller", "")))
     resp.hangup()
     return twiml(resp)
 

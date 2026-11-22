@@ -42,7 +42,8 @@ def test_direct_answer_rings_forward_without_polly(client, monkeypatch):
     assert "+19095551212" in r.text
     assert 'timeout="20"' in r.text
     assert 'answerOnBridge="true"' in r.text
-    assert 'url="/api/voice/screen"' in r.text
+    assert 'callerId="+18005550100"' in r.text
+    assert 'url="/api/voice/screen?caller=%2B15551230000"' in r.text
     assert "Connecting you now" not in r.text
     assert "<Gather" not in r.text
     assert "<Connect" not in r.text
